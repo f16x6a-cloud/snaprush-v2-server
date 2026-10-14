@@ -15,59 +15,58 @@ import random
 import secrets
 import threading
 import time
-from typing import Optional
+from typing import Optional, Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from PIL import Image, ImageOps, UnidentifiedImageError
-import httpx
 import qrcode
+
+from ai_verifier import verify_image
 
 ROOT = Path(__file__).resolve().parent
 MEDIA_DIR = Path(os.getenv("MEDIA_DIR", "/tmp/snaprush_media"))
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
-AI_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4.1-mini")
 MAX_FILE_BYTES = 5 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 POINTS = [100, 70, 40, 20, 0, 0]
 ROOM_TTL = 2 * 60 * 60
 
-# Explicit aliases prevent ambiguity (animal mouse vs computer mouse, for example).
-CATALOG = [
-    ("mouse", "ماوس كمبيوتر", "Computer mouse", "A computer pointing device, not an animal."),
-    ("cup", "كوب", "Cup", "A drinking cup or mug."),
-    ("bottle", "قارورة ماء", "Water bottle", "A bottle used to hold drinking water."),
-    ("keys", "مفاتيح", "Keys", "One or more physical keys."),
-    ("watch", "ساعة يد", "Wristwatch", "A watch worn on the wrist."),
-    ("keyboard", "لوحة مفاتيح", "Keyboard", "A computer keyboard."),
-    ("headphones", "سماعة رأس", "Headphones", "Headphones or over-ear headset."),
-    ("spoon", "ملعقة", "Spoon", "Eating utensil spoon."),
-    ("fork", "شوكة", "Fork", "Eating utensil fork."),
-    ("book", "كتاب", "Book", "A physical book."),
-    ("pen", "قلم", "Pen", "A writing pen."),
-    ("shoe", "حذاء", "Shoe", "One visible shoe or sneaker."),
-    ("glasses", "نظارة", "Glasses", "Eyeglasses or sunglasses."),
-    ("remote", "ريموت", "Remote control", "A TV or device remote control."),
-    ("pillow", "مخدة", "Pillow", "A cushion or pillow."),
-    ("lamp", "مصباح", "Lamp", "A household lamp."),
-    ("wallet", "محفظة", "Wallet", "A wallet for cards or money."),
-    ("notebook", "دفتر", "Notebook", "Paper notebook."),
-    ("chair", "كرسي", "Chair", "A chair for sitting."),
-    ("toothbrush", "فرشاة أسنان", "Toothbrush", "A toothbrush."),
-    ("towel", "منشفة", "Towel", "A fabric towel."),
-    ("phone", "جوال", "Mobile phone", "A mobile smartphone."),
-    ("charger", "شاحن", "Charger", "A phone or laptop charging adapter or cable."),
-    ("scissors", "مقص", "Scissors", "A pair of scissors."),
-    ("plate", "صحن", "Plate", "A dish plate for food."),
-    ("brush", "فرشاة شعر", "Hairbrush", "A hairbrush."),
-    ("backpack", "شنطة ظهر", "Backpack", "A backpack."),
-    ("cap", "كاب", "Baseball cap", "A baseball cap."),
-    ("comb", "مشط", "Comb", "A comb for hair."),
-    ("paper", "ورقة", "Paper sheet", "A sheet of paper."),
-]
+# Object-only bilingual catalog. Color variants intentionally excluded.
+# Keep the CATALOG tuple format and target IDs unchanged for Unity compatibility.
+CATALOG_DATA = json.loads((ROOT / "data" / "objects.json").read_text(encoding="utf-8"))
+CATALOG_ITEMS = CATALOG_DATA["items"]
+CATALOG = [(c["id"], c["ar"], c["en"], c["ai_description"]) for c in CATALOG_ITEMS]
+CATALOG_INDEX = {item["id"]: i for i, item in enumerate(CATALOG_ITEMS)}
+assert len(CATALOG) == len(CATALOG_INDEX) == CATALOG_DATA["count"]
+assert all(item.get("kind") == "object" and not item.get("color") for item in CATALOG_ITEMS)
+
+
+def _new_challenge_order(rounds: int, mode: str = "mixed") -> list[int]:
+    """Draw unique, safer household objects with availability-aware weighting.
+
+    `mixed` prioritizes objects that an average household might have.
+    `all`/`objects` allow the broader (nonhazardous) catalog.
+    This does not modify any legacy target identifiers used by Unity.
+    """
+    eligible = [(i, item) for i, item in enumerate(CATALOG_ITEMS)
+                if item.get("safety", "general") == "general"]
+    if rounds < 1 or rounds > len(eligible):
+        raise ValueError("Round count exceeds the safe object pool")
+    rng = random.SystemRandom()
+    if mode == "mixed":
+        availability_weight = {"common": 12.0, "occasional": 3.5, "specialty": 0.25}
+        weighted = []
+        for i, item in eligible:
+            factor = availability_weight.get(item.get("availability", "occasional"), 2.0)
+            weighted.append((rng.random() ** (1.0 / factor), i))
+        weighted.sort(reverse=True)
+        return [i for _, i in weighted[:rounds]]
+    return rng.sample([i for i, _ in eligible], rounds)
+
 
 app = FastAPI(title="SNAP RUSH — Unity-controlled Camera Service", version="0.2.0")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -93,6 +92,7 @@ class Submission:
     status: str = "analyzing"  # analyzing, correct, incorrect, unverified
     reason: str = ""
     award: int = 0
+    detected_object: str = ""
 
 
 @dataclass
@@ -113,6 +113,7 @@ class Room:
     current_round: int = 0
     challenge_order: list[int] = field(default_factory=list)
     active_seconds: int = 60
+    catalog_mode: str = "mixed"
     submissions: list[Submission] = field(default_factory=list)
 
     def current_target(self) -> Optional[tuple[str, str, str, str]]:
@@ -125,6 +126,7 @@ class RoomCreate(BaseModel):
     players: int = Field(default=2, ge=2, le=6)
     rounds: int = Field(default=5, ge=1, le=15)
     seconds: int = Field(default=60, ge=15, le=120)
+    catalog_mode: Literal["mixed", "objects", "all"] = "mixed"
 
 
 class JoinRequest(BaseModel):
@@ -244,6 +246,9 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
         latest[s.slot] = {
             "slot": s.slot, "photo_url": f"/media/{room.id}/{s.id}.jpg",
             "status": s.status, "reason": s.reason,
+            "verdict": {"correct": "approved", "incorrect": "rejected", "analyzing": "pending", "unverified": "unavailable"}.get(s.status, "unavailable"),
+            "approved": True if s.status == "correct" else False if s.status == "incorrect" else None,
+            "detected_object": s.detected_object,
             "award": s.award, "created_at": s.created_at,
         }
     result = {
@@ -255,7 +260,7 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
         "target": {"id": current[0], "ar": current[1], "en": current[2]} if current and room.state in ("round_active", "round_review", "finished") else None,
         "slots": slots, "photos": list(latest.values()),
         "ai_enabled": bool(os.getenv("OPENAI_API_KEY")),
-        "control": "unity",
+        "control": "unity", "catalog_size": len(CATALOG),
     }
     if is_host:
         result["general_join_path"] = f"/join?room={room.id}&token={room.auto_token}"
@@ -289,13 +294,13 @@ def create_room(payload: RoomCreate):
         room_id = secrets.token_hex(4).upper()
         while room_id in _rooms:
             room_id = secrets.token_hex(4).upper()
-        order = list(range(len(CATALOG)))
-        random.SystemRandom().shuffle(order)
+        order = _new_challenge_order(payload.rounds, payload.catalog_mode)
         room = Room(
             id=room_id, host_key=secrets.token_urlsafe(32),
             size=payload.players, rounds=payload.rounds, seconds=payload.seconds,
             active_seconds=payload.seconds,
-            challenge_order=(order * (payload.rounds // len(order) + 1))[:payload.rounds],
+            challenge_order=order,
+            catalog_mode=payload.catalog_mode,
             slot_tokens={i: secrets.token_urlsafe(24) for i in range(1, payload.players + 1)},
         )
         _rooms[room_id] = room
@@ -372,7 +377,7 @@ def start_round(room_id: str, payload: HostStartRound):
             raise HTTPException(409, "Wait for pending image analysis before continuing")
         next_round = room.current_round + 1
         if payload.target_id is not None:
-            match_index = next((i for i, c in enumerate(CATALOG) if c[0] == payload.target_id), None)
+            match_index = CATALOG_INDEX.get(payload.target_id)
             if match_index is None:
                 raise HTTPException(422, "Unknown challenge target_id")
             room.challenge_order[next_round - 1] = match_index
@@ -422,9 +427,7 @@ def reset_room(room_id: str, payload: HostRequest):
         room.submissions.clear()
         room.slot_tokens = {i: secrets.token_urlsafe(24) for i in range(1, room.size + 1)}
         room.auto_token = secrets.token_urlsafe(24)
-        order = list(range(len(CATALOG)))
-        random.SystemRandom().shuffle(order)
-        room.challenge_order = (order * (room.rounds // len(order) + 1))[:room.rounds]
+        room.challenge_order = _new_challenge_order(room.rounds, room.catalog_mode)
         return {"ok": True}
 
 
@@ -441,47 +444,18 @@ def _decode_image(raw: bytes) -> bytes:
 
 
 def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_description: str):
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        with _lock:
-            room = _rooms.get(room_id)
-            if room:
-                s = next((v for v in room.submissions if v.id == submission_id), None)
-                if s:
-                    s.status, s.reason = "unverified", "AI provider not configured"
-        return
-    encoded = base64.b64encode(jpg).decode("ascii")
-    prompt = (
-        "You are a strict image object verifier for a family party game. "
-        f"Requested object: {requested_description}. "
-        "Determine whether the requested physical object is clearly visible in the provided photo. "
-        "Do not accept text labels, screens showing pictures of the object, or an unrelated lookalike. "
-        'Return JSON only: {"is_match":true or false,"reason":"brief explanation"}. '
-        "If uncertain, set is_match to false."
-    )
-    try:
-        with httpx.Client(timeout=35) as client:
-            response = client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": AI_MODEL,
-                      "messages": [{"role": "user", "content": [
-                          {"type": "text", "text": prompt},
-                          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + encoded, "detail": "low"}}
-                      ]}], "temperature": 0, "response_format": {"type": "json_object"}, "max_tokens": 140},
-            )
-            response.raise_for_status()
-            result = json.loads(response.json()["choices"][0]["message"]["content"])
-            status = "correct" if result.get("is_match") is True else "incorrect"
-            reason = str(result.get("reason", ""))[:180]
-    except Exception:
-        status, reason = "unverified", "AI could not verify this image; no points awarded"
+    # This function runs after HTTP upload succeeds so Unity sees the photo
+    # immediately as `analyzing`. Never block upload while calling the AI.
+    result = verify_image(jpg, requested_description)
     with _lock:
         room = _rooms.get(room_id)
         if room:
-            s = next((v for v in room.submissions if v.id == submission_id), None)
-            if s:
-                s.status, s.reason = status, reason
+            sub = next((v for v in room.submissions if v.id == submission_id), None)
+            if sub and sub.status == "analyzing":
+                sub.status = result.status
+                sub.reason = result.reason
+                sub.detected_object = result.detected_object
+                # Recompute using the original server receipt time, NOT when AI finished.
                 _recompute_scores(room)
 
 
@@ -552,5 +526,30 @@ def host_qr(room_id: str, payload: HostRequest, request: Request):
 
 
 @app.get("/api/catalog")
-def get_catalog():
-    return {"items": [{"id": obj[0], "ar": obj[1], "en": obj[2]} for obj in CATALOG]}
+def get_catalog(category: Optional[str] = None, difficulty: Optional[str] = None,
+                kind: Optional[str] = None, offset: int = 0, limit: int = 5000):
+    """Bilingual photo targets; only physical objects, never color variants."""
+    if offset < 0 or not 1 <= limit <= 5000:
+        raise HTTPException(422, "offset must be >=0 and limit must be 1..5000")
+    filtered = [item for item in CATALOG_ITEMS if
+                (not category or item["category"] == category) and
+                (not difficulty or item["difficulty"] == difficulty) and
+                (not kind or item["kind"] == kind)]
+    result = []
+    for item in filtered[offset:offset + limit]:
+        result.append({k: item[k] for k in ("id", "ar", "en", "category", "difficulty", "kind", "base_id")})
+    return {"count": len(filtered), "items": result, "offset": offset, "limit": limit,
+            "total_catalog": len(CATALOG_ITEMS)}
+
+
+@app.get("/api/catalog/stats")
+def catalog_stats():
+    categories = {}
+    for item in CATALOG_ITEMS:
+        categories[item["category"]] = categories.get(item["category"], 0) + 1
+    return {"total_challenges": len(CATALOG_ITEMS),
+            "base_object_types": CATALOG_DATA["base_object_count"],
+            "color_variants": CATALOG_DATA["variant_count"],
+            "distinct_object_target": CATALOG_DATA["target_distinct_objects"],
+            "categories": categories,
+            "note": CATALOG_DATA["note"]}
