@@ -1,4 +1,4 @@
-"""Snap Rush prototype server: temporary in-memory multiplayer + mobile camera.
+"""Snap Rush phone-camera service controlled by a Unity lobby.
 
 Run with: uvicorn main:app --host 0.0.0.0 --port 7860
 For production: replace volatile storage, use a single instance or shared state, add durable media.
@@ -69,7 +69,7 @@ CATALOG = [
     ("paper", "ورقة", "Paper sheet", "A sheet of paper."),
 ]
 
-app = FastAPI(title="SNAP RUSH — Camera Party Server", version="0.1.0")
+app = FastAPI(title="SNAP RUSH — Unity-controlled Camera Service", version="0.2.0")
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _lock = threading.RLock()
 _rooms: dict[str, "Room"] = {}
@@ -112,6 +112,7 @@ class Room:
     review_end: float = 0
     current_round: int = 0
     challenge_order: list[int] = field(default_factory=list)
+    active_seconds: int = 60
     submissions: list[Submission] = field(default_factory=list)
 
     def current_target(self) -> Optional[tuple[str, str, str, str]]:
@@ -137,8 +138,18 @@ class PlayerRequest(BaseModel):
     session: str
 
 
-class ReadyRequest(PlayerRequest):
+class HostPlayerReady(BaseModel):
+    host_key: str
+    slot: int = Field(ge=1, le=6)
     ready: bool = True
+
+
+class HostStartRound(BaseModel):
+    # Called only by the Unity lobby, never by a player's phone.
+    host_key: str
+    target_id: Optional[str] = None
+    seconds: Optional[int] = Field(default=None, ge=15, le=120)
+    countdown_seconds: int = Field(default=3, ge=0, le=10)
 
 
 class HostRequest(BaseModel):
@@ -190,26 +201,18 @@ def _recompute_scores(room: Room) -> None:
 
 
 def _advance(room: Room) -> None:
+    """Apply time-based state transitions, but NEVER start another round.
+
+    Unity is the only caller allowed to choose when a new round starts.
+    """
     now = time.time()
     if room.state == "countdown" and now >= room.start_at:
         room.state = "round_active"
-        room.deadline = room.start_at + room.seconds
+        room.deadline = room.start_at + room.active_seconds
     if room.state == "round_active" and now >= room.deadline:
         room.state = "round_review"
         room.review_end = now + 7
-    if room.state == "round_review" and now >= room.review_end:
-        pending = any(s.status == "analyzing" and s.round_no == room.current_round for s in room.submissions)
-        # Give slow inference up to 18 seconds after the deadline.
-        if pending and now < room.deadline + 18:
-            room.review_end = now + 2
-            return
-        if room.current_round >= room.rounds:
-            room.state = "finished"
-        else:
-            room.current_round += 1
-            room.state = "countdown"
-            room.start_at = now + 3
-            room.deadline = 0
+    # Intentionally do not auto-progress to the next round: Unity owns it.
 
 
 def _qr_data(url: str) -> str:
@@ -246,15 +249,17 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
     result = {
         "room_id": room.id, "state": room.state, "capacity": room.size,
         "connected": len(room.players), "ready_count": sum(p.ready for p in room.players.values()),
-        "rounds": room.rounds, "seconds": room.seconds,
+        "rounds": room.rounds, "seconds": room.active_seconds,
         "round": room.current_round, "start_at": room.start_at,
         "deadline": room.deadline, "server_now": time.time(),
         "target": {"id": current[0], "ar": current[1], "en": current[2]} if current and room.state in ("round_active", "round_review", "finished") else None,
         "slots": slots, "photos": list(latest.values()),
         "ai_enabled": bool(os.getenv("OPENAI_API_KEY")),
+        "control": "unity",
     }
     if is_host:
         result["general_join_path"] = f"/join?room={room.id}&token={room.auto_token}"
+        result["max_rounds"] = room.rounds
     else:
         p = _auth_player(room, current_session)
         result["my_slot"] = p.slot
@@ -265,12 +270,12 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
 
 @app.get("/")
 def host_page():
-    return FileResponse(ROOT / "static" / "host.html")
+    return FileResponse(ROOT / "static" / "host.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/join")
 def join_page():
-    return FileResponse(ROOT / "static" / "player.html")
+    return FileResponse(ROOT / "static" / "player.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/health")
@@ -289,6 +294,7 @@ def create_room(payload: RoomCreate):
         room = Room(
             id=room_id, host_key=secrets.token_urlsafe(32),
             size=payload.players, rounds=payload.rounds, seconds=payload.seconds,
+            active_seconds=payload.seconds,
             challenge_order=(order * (payload.rounds // len(order) + 1))[:payload.rounds],
             slot_tokens={i: secrets.token_urlsafe(24) for i in range(1, payload.players + 1)},
         )
@@ -329,19 +335,64 @@ def join_room(payload: JoinRequest):
         return {"room_id": room.id, "session": p.session, "slot": slot}
 
 
-@app.post("/api/ready")
-def set_ready(payload: ReadyRequest):
+@app.post("/api/rooms/{room_id}/host/player-ready")
+def host_player_ready(room_id: str, payload: HostPlayerReady):
+    """Only Unity can mark a joined player as Ready from its lobby UI."""
     with _lock:
-        room = _get_room(payload.room_id)
+        room = _get_room(room_id)
+        _auth_host(room, payload.host_key)
         if room.state != "waiting":
-            raise HTTPException(409, "Ready can only change before the match")
-        p = _auth_player(room, payload.session)
+            raise HTTPException(409, "Ready can only change while waiting")
+        p = room.players.get(payload.slot)
+        if p is None:
+            raise HTTPException(404, "Player slot has not joined")
         p.ready = payload.ready
-        if len(room.players) >= 2 and all(player.ready for player in room.players.values()):
-            room.state = "countdown"
-            room.current_round = 1
-            room.start_at = time.time() + 3
-        return {"ok": True, "state": room.state}
+        return _snapshot(room, True)
+
+
+@app.post("/api/rooms/{room_id}/host/start-round")
+def start_round(room_id: str, payload: HostStartRound):
+    """Unity lobby explicitly begins each round; the mobile site cannot.
+
+    If target_id is omitted, uses the server's shuffled object catalog.
+    """
+    with _lock:
+        room = _get_room(room_id)
+        _auth_host(room, payload.host_key)
+        if room.state not in {"waiting", "round_review"}:
+            raise HTTPException(409, "Finish or review the current round before starting another")
+        if room.current_round >= room.rounds:
+            raise HTTPException(409, "All configured rounds are complete")
+        if room.state == "waiting" and (len(room.players) < 2 or not all(p.ready for p in room.players.values())):
+            raise HTTPException(409, "At least two connected players must be marked Ready by the Unity lobby")
+        if room.state == "round_review" and any(
+            s.status == "analyzing" and s.round_no == room.current_round
+            for s in room.submissions
+        ):
+            raise HTTPException(409, "Wait for pending image analysis before continuing")
+        next_round = room.current_round + 1
+        if payload.target_id is not None:
+            match_index = next((i for i, c in enumerate(CATALOG) if c[0] == payload.target_id), None)
+            if match_index is None:
+                raise HTTPException(422, "Unknown challenge target_id")
+            room.challenge_order[next_round - 1] = match_index
+        room.current_round = next_round
+        room.active_seconds = payload.seconds or room.seconds
+        room.start_at = time.time() + payload.countdown_seconds
+        room.deadline = room.start_at + room.active_seconds
+        room.review_end = 0
+        room.state = "countdown" if payload.countdown_seconds else "round_active"
+        return _snapshot(room, True)
+
+
+@app.post("/api/rooms/{room_id}/host/finish")
+def finish_match(room_id: str, payload: HostRequest):
+    """Finish the match from Unity, never from the player website."""
+    with _lock:
+        room = _get_room(room_id)
+        _auth_host(room, payload.host_key)
+        room.state = "finished"
+        return _snapshot(room, True)
 
 
 @app.post("/api/leave")
@@ -366,6 +417,7 @@ def reset_room(room_id: str, payload: HostRequest):
         room.state = "waiting"
         room.current_round = 0
         room.start_at = room.deadline = room.review_end = 0
+        room.active_seconds = room.seconds
         room.players.clear()
         room.submissions.clear()
         room.slot_tokens = {i: secrets.token_urlsafe(24) for i in range(1, room.size + 1)}
@@ -497,3 +549,8 @@ def host_qr(room_id: str, payload: HostRequest, request: Request):
                     images[str(slot)] = {"path": path}
         auto_path = f"/join?room={room.id}&token={room.auto_token}"
         return {"qr": images, "general": {"image": _qr_data(host + auto_path) if host else None, "path": auto_path}}
+
+
+@app.get("/api/catalog")
+def get_catalog():
+    return {"items": [{"id": obj[0], "ar": obj[1], "en": obj[2]} for obj in CATALOG]}

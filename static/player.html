@@ -1,13 +1,56 @@
-<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0a0d1a"><title>SNAP RUSH | كاميرا اللاعب</title><link rel="stylesheet" href="/static/style.css"></head><body>
-<div class="shell device">
-<header class="phone-heading"><div class="logo"><span class="logo-mark">📸</span><div class="wordmark" dir="ltr"><span class="top">SNAP</span><span class="bottom">RUSH</span></div></div><p>صوّر أسرع من الجميع!</p></header>
-<div class="card" id="joining"><div class="eyebrow center">YOUR PLAYER SLOT</div><div class="player-label" id="playerNumber">CONNECTING</div><div class="status-card" id="playerStatus">جاري الدخول تلقائيًا...</div>
-<div class="frame"><div class="screen-title">CHALLENGE SCREEN</div><div class="target" id="target">WAITING...</div><div class="muted" id="roundStatus">بانتظار باقي اللاعبين</div><div class="timer" id="timer"></div></div>
-<button id="ready" class="btn btn-mint wide" style="margin-top:20px">✓ أنا جاهز — READY</button>
-<button id="openCamera" class="btn btn-gold wide" style="margin-top:17px">📸 افتح الكاميرا الأمامية</button>
-<section id="cameraSection" class="hide" style="margin-top:20px"><div id="cameraBox" class="camera-wrap selfie"><video id="video" autoplay muted playsinline></video><span class="cam-corner tl"></span><span class="cam-corner tr"></span><span class="cam-corner bl"></span><span class="cam-corner br"></span></div><div class="camera-controls"><button id="snap" class="btn btn-pink" disabled>● التقط وأرسل</button><button id="flip" class="btn btn-outline">⇄ تبديل</button></div><div class="muted small center" style="margin-top:12px">تُعرض الصورة فوق شخصيتك بمجرد وصولها للسيرفر، ثم يبدأ تحليلها.</div></section>
-<input id="fallback" type="file" accept="image/*" capture="user" hidden>
-<div id="myPhoto" class="photo-list"></div>
-<div class="divider"></div><button id="leave" class="btn btn-danger wide">↪ خروج من الغرفة</button><div id="toast" class="toast" role="status" aria-live="polite"></div>
-</div><p class="footer">لا تحتاج اسمًا ولا حسابًا • الرقم مرتبط بالـQR الخاص بك</p></div>
-<script src="/static/player.js" defer></script></body></html>
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1024"><title>SNAP RUSH | تصوير</title>
+  <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body class="player-page">
+  <main class="phone-shell">
+    <header class="phone-header">
+      <div class="wordmark"><span>SNAP</span><span>RUSH</span></div>
+      <span id="connection" class="connected-chip"><i></i> جاري الاتصال...</span>
+    </header>
+
+    <section class="identity-panel" aria-label="اللاعب الحالي">
+      <div>
+        <div class="tiny-label">أنت متصل بشخصيتك تلقائيًا</div>
+        <div id="playerNumber" class="player-number">PLAYER --</div>
+      </div>
+      <div class="identity-icon" aria-hidden="true">📸</div>
+    </section>
+
+    <div class="camera-intro"><p class="eyebrow">CAPTURE THE MOMENT ⚡</p><h1>جهّز الكاميرا!</h1><p>صور الغرض المطلوب من اللعبة. صورتك بتطلع فوق شخصيتك بمجرد وصولها.</p></div>
+
+    <section class="camera-card" aria-label="كاميرا التصوير">
+      <div id="cameraBox" class="camera-viewport selfie">
+        <video id="video" autoplay muted playsinline></video>
+        <div id="cameraPlaceholder" class="camera-placeholder">
+          <div class="placeholder-camera" aria-hidden="true">📷</div>
+          <strong>خلّنا نفتح الكاميرا</strong>
+          <span>الافتراضي: الكاميرا الأمامية</span>
+        </div>
+        <span class="viewfinder tl"></span><span class="viewfinder tr"></span><span class="viewfinder bl"></span><span class="viewfinder br"></span>
+        <span class="camera-tag">LIVE SNAP</span>
+      </div>
+      <div id="statusLine" class="camera-status" role="status" aria-live="polite">بانتظار الربط مع اللعبة...</div>
+      <button id="openCamera" class="action-button open-button" disabled>📸 افتح الكاميرا الأمامية</button>
+      <div class="capture-row">
+        <button id="flip" class="small-button" disabled title="تبديل الكاميرا">↻ تبديل</button>
+        <button id="snap" class="action-button snap-button" disabled>● التقط وأرسل</button>
+      </div>
+      <button id="useSystemCamera" class="system-camera" disabled>ما اشتغلت الكاميرا؟ استخدم تصوير الجوال</button>
+      <input id="fallback" type="file" accept="image/*" capture="user" hidden>
+    </section>
+
+    <section class="latest-card" aria-label="آخر صورة">
+      <div class="section-head"><h2>آخر لقطة</h2><span id="photoBadge">NO SNAP YET</span></div>
+      <div id="myPhoto" class="photo-result"><div class="empty-photo">صورتك ونتيجة التحليل بتظهر هنا بعد الإرسال ✨</div></div>
+    </section>
+    <button id="leave" class="leave-button" disabled>↪ خروج من اللعبة</button>
+    <p class="privacy-note">بدون اسم أو حساب • صورك مرتبطة برقم لاعبك في الغرفة فقط</p>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script src="/static/player.js?v=2" defer></script>
+</body>
+</html>

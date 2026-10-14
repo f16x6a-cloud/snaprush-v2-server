@@ -1,18 +1,151 @@
 'use strict';
-const $=s=>document.querySelector(s);
-const params=new URLSearchParams(location.search),roomId=params.get('room'),token=params.get('token');
-const localKey='snaprush_player_'+roomId;
-let current=JSON.parse(localStorage.getItem(localKey)||'null'),scene=null,stream=null,facing='user',busy=false,polling=false,serverOffset=0;
-function toast(message){$('#toast').textContent=message}
-async function api(path,options={}){const r=await fetch(path,options);const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:'تعذّر الاتصال بالخادم');return d}
-async function connect(){if(!roomId||!token){toast('الرابط غير صالح. امسح QR من شاشة اللعبة.');$('#playerNumber').textContent='INVALID QR';return}try{const data=await api('/api/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:roomId,token,previous_session:current?.session||null})});current=data;localStorage.setItem(localKey,JSON.stringify(current));$('#playerNumber').textContent='PLAYER '+String(current.slot).padStart(2,'0');toast('✓ تم ربط جوالك تلقائيًا بالشخصية رقم '+current.slot);await tick()}catch(e){toast(e.message);$('#playerNumber').textContent='TRY AGAIN'}}
-function countdown(s){const now=Date.now()/1000+serverOffset;if(s.state==='countdown')return Math.max(0,Math.ceil(s.start_at-now))+'...';if(s.state==='round_active')return Math.max(0,Math.ceil(s.deadline-now))+'s';return ''}
-function render(s){scene=s;serverOffset=s.server_now-Date.now()/1000;$('#playerStatus').textContent= s.state==='waiting'?(s.my_ready?'✅ أنت جاهز':'بانتظار ضغط READY'):s.state==='round_active'?'⚡ الجولة بدأت!':s.state==='finished'?'🏆 انتهت المباراة':s.state==='countdown'?'استعد!':'جارٍ مراجعة الصور';$('#target').textContent=s.target?s.target.ar:'READY?';$('#roundStatus').textContent=s.target?(s.target.en+' • الجولة '+s.round+' / '+s.rounds):s.state==='waiting'?'اضغط جاهز وانتظر باقي اللاعبين':s.state==='countdown'?'التحدي سيظهر على الشاشة':'الجولة لم تبدأ بعد';$('#timer').textContent=countdown(s);$('#ready').disabled=s.state!=='waiting';$('#ready').textContent=s.my_ready?'✓ جاهز!':'✓ أنا جاهز — READY';$('#ready').classList.toggle('btn-outline',s.my_ready);$('#snap').disabled=s.state!=='round_active'||busy||!stream;const existing=s.photos.find(p=>p.slot===current.slot);const area=$('#myPhoto');area.replaceChildren();if(existing){const row=document.createElement('div');row.className='photo-line';const img=document.createElement('img');img.className='photo-preview';img.src=existing.photo_url;img.alt='صورتك المرسلة';img.addEventListener('click',()=>window.open(existing.photo_url,'_blank'));const details=document.createElement('div');const headline=document.createElement('strong');const codes={analyzing:'⏳ جاري التحليل',correct:'✅ صورة صحيحة',incorrect:'❌ صورة غير صحيحة',unverified:'⚠️ لا يوجد تحليل AI'};headline.textContent=codes[existing.status]||existing.status;const msg=document.createElement('div');msg.className='muted small';msg.textContent=existing.reason||(existing.award?('+'+existing.award+' نقطة'):'ظهرت فوق شخصيتك');details.append(headline,msg);row.append(img,details);area.append(row)}}
-async function tick(){if(!current||polling)return;polling=true;try{const s=await api('/api/rooms/'+current.room_id+'/state',{headers:{'x-session':current.session}});render(s)}catch(e){toast(e.message)}finally{polling=false}}
-async function ready(){if(!current||!scene)return;try{await api('/api/ready',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:current.room_id,session:current.session,ready:!scene.my_ready})});await tick()}catch(e){toast(e.message)}}
-function stopCamera(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}$('#video').srcObject=null;$('#cameraSection').classList.add('hide')}
-async function startCamera(){stopCamera();try{if(!navigator.mediaDevices?.getUserMedia)throw new Error('Camera API unavailable');stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:960}}});$('#video').srcObject=stream;$('#cameraBox').classList.toggle('selfie',facing==='user');$('#cameraSection').classList.remove('hide');$('#openCamera').textContent='✓ الكاميرا مفتوحة';if(scene)render(scene)}catch(e){toast('تعذّر فتح الكاميرا داخل المتصفح. جرّب التصوير المباشر بالنظام.');$('#fallback').setAttribute('capture',facing);$('#fallback').click()}}
-async function uploadBlob(blob){if(!current||busy)return;if(!scene||scene.state!=='round_active'){toast('انتظر بداية الجولة قبل إرسال الصور.');return}busy=true;$('#snap').disabled=true;toast('جارٍ إرسال الصورة...');try{const form=new FormData();form.append('session',current.session);form.append('file',blob,'snap.jpg');const d=await api('/api/rooms/'+current.room_id+'/photos',{method:'POST',body:form});toast(d.status==='unverified'?'📸 وصلت الصورة وظهرت لشخصيتك. AI غير مفعّل.':'📸 وصلت الصورة! تظهر فوق شخصيتك ويجري تحليلها.');await tick()}catch(e){toast(e.message)}finally{busy=false;if(scene)render(scene)}}
-async function snap(){if(!stream)return;const video=$('#video');if(!video.videoWidth){toast('الكاميرا لم تجهز بعد');return}const c=document.createElement('canvas');const sf=Math.min(1,1024/Math.max(video.videoWidth,video.videoHeight));c.width=Math.round(video.videoWidth*sf);c.height=Math.round(video.videoHeight*sf);c.getContext('2d').drawImage(video,0,0,c.width,c.height);c.toBlob(blob=>blob&&uploadBlob(blob),'image/jpeg',.84)}
-$('#ready').addEventListener('click',ready);$('#openCamera').addEventListener('click',startCamera);$('#snap').addEventListener('click',snap);$('#flip').addEventListener('click',()=>{facing=facing==='user'?'environment':'user';startCamera()});$('#fallback').addEventListener('change',e=>{const f=e.target.files?.[0];if(f)uploadBlob(f);e.target.value=''})
-$('#leave').addEventListener('click',async()=>{if(!current)return;const session=current;stopCamera();try{await api('/api/leave',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:session.room_id,session:session.session})})}catch{}localStorage.removeItem(localKey);current=null;$('#ready').disabled=true;$('#openCamera').disabled=true;toast('تم الخروج. تقدر تدخل من QR جديد إذا اللعبة ما بدأت بعد.')});window.addEventListener('pagehide',stopCamera);connect();setInterval(tick,1000);
+// The phone ONLY captures and uploads photos. Unity owns Ready, rounds and timers.
+const $ = (selector) => document.querySelector(selector);
+const params = new URLSearchParams(location.search);
+const roomId = params.get('room');
+const token = params.get('token');
+const localKey = 'snaprush_camera_session_' + (roomId || 'unknown');
+let current = null;
+try { current = JSON.parse(localStorage.getItem(localKey) || 'null'); } catch { localStorage.removeItem(localKey); }
+let state = null, stream = null, facing = 'user', uploading = false, polling = false;
+const statuses = {
+  analyzing: ['⏳ جاري تحليل الصورة', 'تحليلك بدأ والصورة وصلت للعبة'],
+  correct: ['✅ صورة صحيحة!', 'تم احتساب النقاط في اللعبة'],
+  incorrect: ['❌ الغرض غير مطابق', 'تقدر تعيد المحاولة خلال الجولة'],
+  unverified: ['⚠️ التحليل غير متاح', 'الصورة وصلت للعبة، لكن لم يُحتسب لها نقاط']
+};
+function notice(message) { $('#toast').textContent = message; }
+async function api(path, options={}) {
+  const response = await fetch(path, {cache:'no-store', ...options});
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'تعذّر الاتصال بالسيرفر');
+  return data;
+}
+function setConnected(ok) {
+  const chip = $('#connection'); chip.classList.toggle('online', !!ok);
+  chip.lastChild.textContent = ok ? ' متصل باللعبة' : ' غير متصل';
+  $('#openCamera').disabled = !ok;
+  $('#useSystemCamera').disabled = !ok;
+  $('#leave').disabled = !ok;
+}
+async function connect() {
+  if (!roomId) {
+    $('#playerNumber').textContent = 'INVALID QR';
+    $('#statusLine').textContent = 'افتح الرابط من QR الموجود فوق شخصيتك في لعبة SNAP RUSH';
+    return;
+  }
+  try {
+    // A securely saved session can reconnect even after removing the used QR token from the address bar.
+    if (current && current.room_id === roomId && current.session) {
+      try {
+        const s = await api('/api/rooms/'+roomId+'/state', {headers:{'x-session':current.session}});
+        setConnected(true); $('#playerNumber').textContent = 'PLAYER '+String(current.slot).padStart(2,'0');
+        render(s); return;
+      } catch { current = null; localStorage.removeItem(localKey); }
+    }
+    if (!token) throw new Error('امسح QR جديد من اللعبة للدخول');
+    current = await api('/api/join', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:roomId,token})});
+    localStorage.setItem(localKey, JSON.stringify(current));
+    // Hide one-time join token from browser history after successful claim.
+    history.replaceState(null,'', '/join?room='+encodeURIComponent(roomId));
+    $('#playerNumber').textContent = 'PLAYER '+String(current.slot).padStart(2,'0');
+    setConnected(true); notice('✓ جوالك مرتبط بالشخصية رقم '+current.slot);
+    await tick();
+  } catch (e) { setConnected(false); $('#playerNumber').textContent='TRY AGAIN'; $('#statusLine').textContent=e.message; notice(e.message); }
+}
+function render(s) {
+  state = s;
+  const active = s.state === 'round_active';
+  const messages = {
+    waiting:'جاهز للتصوير. انتظر بداية التحدي داخل اللعبة.',
+    countdown:'اللوبي بدأ العد التنازلي! استعد للتصوير.',
+    round_active:'⚡ التحدي شغّال! صوّر الغرض المطلوب وأرسل.',
+    round_review:'انتهت الجولة. انتظر التحدي التالي من اللوبي.',
+    finished:'🏆 انتهت المباراة. تقدر تغلق الكاميرا.'
+  };
+  $('#statusLine').textContent=messages[s.state] || 'متصل باللعبة';
+  $('#snap').disabled=!active || !stream || uploading;
+  $('#flip').disabled=!stream || uploading;
+  const shot=s.photos.find(p=>p.slot===current.slot);
+  const container=$('#myPhoto');
+  container.replaceChildren();
+  if (!shot) {
+    const empty=document.createElement('div'); empty.className='empty-photo';
+    empty.textContent='صورتك ونتيجة التحليل بتظهر هنا بعد الإرسال ✨';container.append(empty);
+    $('#photoBadge').textContent='NO SNAP YET'; return;
+  }
+  const wrapper=document.createElement('div'); wrapper.className='photo-line';
+  const img=document.createElement('img'); img.src=shot.photo_url; img.alt='آخر صورة التقطتها';
+  img.addEventListener('click',()=>window.open(shot.photo_url,'_blank','noopener'));
+  const details=document.createElement('div');
+  const strong=document.createElement('strong'); strong.textContent=(statuses[shot.status]||[shot.status])[0];
+  const reason=document.createElement('div'); reason.className='reason';
+  reason.textContent=shot.reason || (statuses[shot.status]||['','الصورة أُرسلت'])[1];
+  if (shot.award) reason.textContent += ' • +'+shot.award+' نقطة';
+  details.append(strong,reason); wrapper.append(img,details);container.append(wrapper);
+  $('#photoBadge').textContent=shot.status.toUpperCase();
+}
+async function tick() {
+  if (!current || polling) return;
+  polling=true;
+  try { const s=await api('/api/rooms/'+current.room_id+'/state', {headers:{'x-session':current.session}});render(s);setConnected(true); }
+  catch(e) {setConnected(false); $('#statusLine').textContent='انقطع الاتصال، نحاول مجددًا...';notice(e.message);}
+  finally {polling=false;}
+}
+function stopCamera() {
+  if (stream) stream.getTracks().forEach(track=>track.stop());
+  stream=null;$('#video').srcObject=null;
+  $('#cameraBox').classList.remove('active');$('#snap').disabled=true;$('#flip').disabled=true;
+}
+async function startCamera() {
+  stopCamera();
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('المتصفح لا يدعم الكاميرا');
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:960}}});
+    $('#video').srcObject=stream;
+    await $('#video').play();
+    $('#cameraBox').classList.add('active');
+    $('#cameraBox').classList.toggle('selfie',facing==='user');
+    $('#openCamera').classList.add('hidden');
+    if (state) render(state);
+  } catch (e) {
+    notice('تعذّر فتح الكاميرا. جرّب زر تصوير الجوال أسفل الكاميرا.');
+    stopCamera();
+    $('#openCamera').classList.remove('hidden');
+  }
+}
+async function uploadBlob(blob) {
+  if (!current || uploading) return;
+  if (state?.state!=='round_active') {notice('انتظر Unity يبدأ التحدي قبل التصوير.');return;}
+  uploading=true;$('#snap').disabled=true;
+  notice('⏳ جاري إرسال الصورة إلى اللعبة...');
+  try {
+    const form=new FormData();form.append('session',current.session);form.append('file',blob,'snapshot.jpg');
+    const result=await api('/api/rooms/'+current.room_id+'/photos',{method:'POST',body:form});
+    notice(result.status==='unverified' ? '📸 وصلت الصورة للعبة، لكن تحليل AI غير مفعّل.' : '📸 وصلت الصورة للعبة! جاري التحليل بالخلفية.');
+    await tick();
+  } catch(e) {notice(e.message);}
+  finally {uploading=false;if(state) render(state);}
+}
+function snap() {
+  if (!stream || uploading) return;
+  const video=$('#video');
+  if (!video.videoWidth) {notice('الكاميرا لم تجهز بعد');return;}
+  const ratio=Math.min(1,1280/Math.max(video.videoWidth,video.videoHeight));
+  const canvas=document.createElement('canvas');canvas.width=Math.round(video.videoWidth*ratio);canvas.height=Math.round(video.videoHeight*ratio);
+  canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+  canvas.toBlob(blob=>{if(blob)uploadBlob(blob);else notice('تعذر إنشاء الصورة')},'image/jpeg',.82);
+}
+$('#openCamera').addEventListener('click',startCamera);
+$('#snap').addEventListener('click',snap);
+$('#flip').addEventListener('click',()=>{facing=facing==='user'?'environment':'user';startCamera()});
+$('#useSystemCamera').addEventListener('click',()=>{$('#fallback').setAttribute('capture',facing);$('#fallback').click()});
+$('#fallback').addEventListener('change',(e)=>{const file=e.target.files?.[0];if(file)uploadBlob(file);e.target.value='';});
+$('#leave').addEventListener('click',async()=>{
+  const old=current;stopCamera();if(!old)return;
+  try {await api('/api/leave',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:old.room_id,session:old.session})})} catch{}
+  current=null;localStorage.removeItem(localKey);
+  location.assign('/');
+});
+window.addEventListener('pagehide',stopCamera);
+connect();setInterval(tick,1200);

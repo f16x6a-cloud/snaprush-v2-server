@@ -1,60 +1,63 @@
-# SNAP RUSH — Mobile Camera Server (Render Free)
+# SNAP RUSH — Camera-Only Website (Unity Lobby Controls)
 
-This project is a two-phone **prototype** for SNAP RUSH. The previous Hugging Face Space is untouched.
+New user experience: the *mobile website* is only a secure(ish) QR-based camera companion. No names, Ready, round count, round timer, or host controls on the public website. The **Unity lobby** owns all those actions through host-authenticated API requests.
 
-## Deploy FREE on Render (no Hugging Face Docker required)
+## Files to deploy
 
-1. Create a NEW empty GitHub repository, such as `snaprush-v2-server`. Do not put secrets in it.
-2. Upload the CONTENTS of this package (not the enclosing folder) to the root of that repo: `main.py`, `requirements.txt`, `render.yaml`, `static/`, etc.
-3. Visit https://dashboard.render.com/ and sign in with GitHub.
-4. New > Web Service > Connect the new GitHub repository.
-5. Choose Python runtime and a **Free** instance. Set:
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers`
-   - Health Check Path (optional): `/health`
-6. Deploy. Wait for a URL such as `https://your-service.onrender.com`.
-7. Open the service homepage on your PC. Use the host panel to create a two-player room, and scan each player's individual QR with two phones.
-8. Optionally set `APP_BASE_URL` to the exact Render HTTPS service URL in Render Environment settings, and redeploy. Without this setting, generated QR links use the forwarded request URL.
-9. To enable REAL AI photo matching, add `OPENAI_API_KEY` in Render Environment, NOT in GitHub; OpenAI API usage may have a separate cost.
+Replace the matching files at your GitHub repo `f16x6a-cloud/snaprush-v2-server` with the content of this package. Keep folder structure. GitHub automatically redeploys Render when you commit to `main`.
 
-**DO NOT select Static Site:** this FastAPI application needs a backend. Choose **Web Service (Free)**.
+- `main.py` FastAPI server
+- `static/host.html` public waiting/QR instruction page (no settings)
+- `static/player.html` mobile camera player screen
+- `static/player.js` camera + upload, no Ready button or round control
+- `static/style.css` new SNAP RUSH theme
+- `tests/test_flow.py` API and mobile UI tests
+- `render.yaml`, `requirements.txt` Render deployment configuration
 
-## What works (prototype)
+Delete the obsolete `static/host.js` from GitHub; it is not used.
 
-- 2–6 slot rooms, individual QR per player, general join QR (no names)
-- Ready synchronization and a 3-second start countdown
-- Random object challenges and timer
-- Mobile **front-facing camera** first with flip button
-- Photo appears immediately after upload; AI check may complete afterward
-- First valid submission gets 100 points, second 70, third 40, fourth 20
-- Unity integration possible by polling the documented HTTP APIs
-- Images are stored temporarily, and AI results require an optional provider API key
+## Actual workflow
 
-## Important limitations on free Render
+1. Unity uses `POST /api/rooms` to create a lobby, requests personalized slot QR codes from `POST /api/rooms/{id}/host/qr` (include `host_key` in JSON). Keep host_key private in Unity; **never** send it to players' phones or include it in QR codes.
+2. Phone scans `/join?room=...&token=...`. It automatically claims an unused slot without nickname, and only displays `PLAYER 01`, etc. Token is removed from the URL after successful join.
+3. A user taps **Open Front Camera** to grant camera permission. HTTPS required (Render provides HTTPS). Front-facing camera is the default; switch/fallback camera is available.
+4. Unity draws **Ready UI**, timer, rounds and target object on the lobby TV. When each player selects Ready in Unity, Unity calls `POST /api/rooms/{id}/host/player-ready` with `{"host_key":"...","slot":1,"ready":true}`.
+5. Unity starts the round by calling `POST /api/rooms/{id}/host/start-round` with `{"host_key":"...","target_id":"mouse","seconds":60,"countdown_seconds":3}`. Must have at least two joined players ready for round 1. `target_id` is optional: the server picks from its shuffled catalog. Use `GET /api/catalog` to list IDs.
+6. Phone's **Take & Send** button is enabled only when the server confirms `round_active`. Upload uses `POST /api/rooms/{id}/photos` (`session` form field + image `file`).
+7. The server immediately returns `photo_url` and `slot`, while any AI request runs in the background. Unity polls `GET /api/rooms/{id}/state` using its private `x-host-key` header and maps `photos[].slot` to the correct character. Example: `photos[0].photo_url = /media/ROOMID/PHOTOID.jpg`. Prepend `https://snaprush-v2.onrender.com`. Show image above character **before** AI result, initially `analyzing`. Status later becomes `correct`, `incorrect`, or `unverified`.
+8. At timeout the backend enters `round_review` but **does not start the next round**. Unity controls the transition by calling `/host/start-round` again after it has shown the results. For the end of the match Unity calls `POST /api/rooms/{id}/host/finish` with its host key. Configure rounds/times in Unity, not the website.
 
-- Service sleeps after ~15 minutes without incoming traffic and may take about one minute to wake.
-- The app currently stores player/room state only in RAM and photos on ephemeral local disk. Reboots, sleep, and redeploys erase live rooms and uploads.
-- This is a testing prototype, **not production**; persistence, stronger upload authorization, moderation/retention, and scalable real-time multiplayer still need implementation.
-- WebSocket service isn't implemented in this V1; Unity should poll the state API.
-- Free service has monthly usage limits. Check Render's current terms and quotas.
+### Host-only API summary
 
-## Local test
+| Method | Route | Unity action |
+|---|---|---|
+| POST | `/api/rooms` | Create room (returns `room_id`, `host_key`) |
+| POST | `/api/rooms/{id}/host/qr` | Get slot QR image and path |
+| GET | `/api/rooms/{id}/state` | Poll state and latest photo (header `x-host-key`) |
+| POST | `/api/rooms/{id}/host/player-ready` | Mark player Ready from lobby |
+| POST | `/api/rooms/{id}/host/start-round` | Start next round, challenge and timer |
+| POST | `/api/rooms/{id}/host/finish` | End match |
+| POST | `/api/rooms/{id}/reset` | Reset room (host key in body) |
+| GET | `/api/catalog` | Get supported challenge IDs |
 
-```bash
-pip install -r requirements.txt
-uvicorn main:app --host 127.0.0.1 --port 7860
-```
+### Scoring / image AI
 
-Then open http://127.0.0.1:7860. Phone camera use on a different device typically requires HTTPS.
+AI verification is **not enabled** unless `OPENAI_API_KEY` is set privately in Render environment variables. Optionally configure `OPENAI_VISION_MODEL`. Without it, the server still displays player photos immediately but marks submissions `unverified`, awarding **zero** points. Never commit an API key into GitHub.
 
-## Unity API quick reference
+Correct photos are awarded based on server upload receipt time: 100 / 70 / 40 / 20 / 0 / 0 points.
 
-- POST `/api/rooms` JSON `{ "players": 2, "rounds": 5, "seconds": 60 }` returns `room_id` and private `host_key`.
-- POST `/api/rooms/{room_id}/host/qr` JSON `{ "host_key": "..." }` returns distinct QR images and a general join URL.
-- GET `/api/rooms/{room_id}/state` with header `x-host-key: ...` returns status, player slots, timer, target, photos, and scores.
-- POST `/api/join` assigns the scanning phone automatically to its QR's unique slot.
-- POST `/api/ready` sets a player's ready state.
-- POST `/api/rooms/{room_id}/photos` multipart file + session receives the photo immediately.
-- GET `/health` verifies process health.
+### Prototype limitations
 
-**Security:** Never commit secrets or private player links. Use test photos until authenticated media access and deletion/retention are implemented.
+- Render Free may sleep after inactivity and does not retain local photos or RAM state over restarts. It is for temporary two-player tests, **not production multiplayer**.
+- In-memory rooms require exactly **one Python worker** (`render.yaml` currently specifies `--workers 1`).
+- Images are served via unguessable paths rather than full photo ACL. Avoid personal/sensitive photos during tests; consider object storage, authenticated media and short retention before release.
+- Unity client integration is an **API contract only**; this package does not modify Unity scenes or source code.
+- The public website does not and cannot force the camera permission prompt until the user taps a button in a secure HTTPS context.
+
+## Test locally
+
+`pip install -r requirements.txt pytest`
+
+`pytest -q`
+
+`uvicorn main:app --host 127.0.0.1 --port 8000`
