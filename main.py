@@ -44,7 +44,12 @@ AI_CLAIM_SECONDS = 180  # long enough for a single Ollama image request
 def _ai_configured() -> bool:
     if AI_PROVIDER == "local":
         return len(os.getenv("SNAPRUSH_AI_WORKER_KEY", "")) >= 32
-    return bool(os.getenv("OPENAI_API_KEY"))
+    if AI_PROVIDER == "cloudflare":
+        return bool(os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip() and
+                    os.getenv("CLOUDFLARE_API_TOKEN", "").strip())
+    if AI_PROVIDER == "openai":
+        return bool(os.getenv("OPENAI_API_KEY"))
+    return False
 
 # Object-only bilingual catalog. Color variants intentionally excluded.
 # Keep the CATALOG tuple format and target IDs unchanged for Unity compatibility.
@@ -104,6 +109,9 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _lock = threading.RLock()
 _rooms: dict[str, "Room"] = {}
 _ai_worker_last_seen: float = 0.0
+# Telemetry only since this Render process started (not Cloudflare billing totals).
+_cloudflare_stats = {"completed": 0, "approved": 0, "rejected": 0,
+                     "unverified": 0, "neurons": 0.0}
 
 
 @dataclass
@@ -336,11 +344,17 @@ def health():
         now = time.time()
         pending = [sub for room in _rooms.values() for sub in room.submissions
                    if sub.status == "analyzing"]
-        return {"status": "ok", "service": "snaprush", "version": app.version,
-                "ai_configured": _ai_configured(), "ai_provider": AI_PROVIDER,
-                "ai_worker_online": AI_PROVIDER == "local" and (now - _ai_worker_last_seen < 30),
-                "ai_jobs_waiting": sum(now >= sub.ai_leased_until for sub in pending),
-                "ai_jobs_processing": sum(now < sub.ai_leased_until for sub in pending)}
+        result = {"status": "ok", "service": "snaprush", "version": app.version,
+                  "ai_configured": _ai_configured(), "ai_provider": AI_PROVIDER,
+                  "ai_worker_online": AI_PROVIDER == "local" and (now - _ai_worker_last_seen < 30),
+                  "ai_jobs_waiting": sum(now >= sub.ai_leased_until for sub in pending),
+                  "ai_jobs_processing": sum(now < sub.ai_leased_until for sub in pending)}
+        if AI_PROVIDER == "cloudflare":
+            result["cloudflare_since_restart"] = {
+                **{k: v for k, v in _cloudflare_stats.items() if k != "neurons"},
+                "neurons": round(_cloudflare_stats["neurons"], 3),
+            }
+        return result
 
 
 @app.post("/api/rooms")
@@ -503,6 +517,11 @@ def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_descr
     # immediately as `analyzing`. Never block upload while calling the AI.
     result = verify_image(jpg, requested_description)
     with _lock:
+        if AI_PROVIDER == "cloudflare":
+            _cloudflare_stats["completed"] += 1
+            _cloudflare_stats[{"correct": "approved", "incorrect": "rejected",
+                               "unverified": "unverified"}[result.status]] += 1
+            _cloudflare_stats["neurons"] += getattr(result, "neurons", 0.0)
         room = _rooms.get(room_id)
         if room:
             sub = next((v for v in room.submissions if v.id == submission_id), None)
