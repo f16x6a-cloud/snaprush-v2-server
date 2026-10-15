@@ -136,6 +136,8 @@ class Submission:
     target_description: str = ""  # snapshotted at upload so changing rounds cannot change a job
     ai_claim: str = ""  # per-claim random token prevents stale/duplicate worker results
     ai_leased_until: float = 0.0
+    resolved_at: float = 0.0
+    resolution_order: int = 0
 
 
 @dataclass
@@ -158,6 +160,9 @@ class Room:
     active_seconds: int = 60
     catalog_mode: str = "mixed"
     submissions: list[Submission] = field(default_factory=list)
+    result_sequence: int = 0
+    round_winners: dict[int, int] = field(default_factory=dict)
+    closed_rounds: dict[int, dict] = field(default_factory=dict)
 
     def current_target(self) -> Optional[tuple[str, str, str, str]]:
         if not self.current_round:
@@ -234,6 +239,24 @@ def _recompute_scores(room: Room) -> None:
             (s for s in room.submissions if s.round_no == r and s.status == "correct"),
             key=lambda s: (s.created_at, s.id),
         )
+        if room.size == 2:
+            current = [sub for sub in room.submissions if sub.round_no == r]
+            latest = {sub.slot: sub for sub in current}
+            pending = any(sub.status == "analyzing" for sub in current)
+            # Finalize only after the round closes, or both submitted results are terminal.
+            finalizable = not pending and (r in room.closed_rounds or
+                (r == room.current_round and room.state == "round_active" and
+                 all(slot in latest for slot in (1, 2))))
+            if correct and finalizable:
+                # 'correct' is sorted by SERVER submission timestamp, then stable ID.
+                winner = correct[0].slot
+                room.round_winners[r] = winner
+                correct[0].award = 100
+                if winner in room.players:
+                    room.players[winner].points += 100
+            else:
+                room.round_winners.pop(r, None)
+            continue
         rewarded: set[int] = set()
         for sub in correct:
             if sub.slot in rewarded:
@@ -243,6 +266,82 @@ def _recompute_scores(room: Room) -> None:
             sub.award = POINTS[position]
             if sub.slot in room.players:
                 room.players[sub.slot].points += sub.award
+
+
+
+def _mark_round_ended(room: Room, now: float, reason: str) -> None:
+    if room.state != "round_active":
+        return
+    room.state = "round_review"
+    room.review_end = now + 7
+    room.closed_rounds[room.current_round] = {
+        "start_at": room.start_at, "deadline": room.deadline,
+        "ended_at": min(now, room.deadline) if reason == "timer" else now,
+        "end_reason": reason,
+    }
+    _recompute_scores(room)
+
+
+def _close_two_player_round_if_ready(room: Room, now: float) -> None:
+    if room.size != 2 or room.state != "round_active":
+        return
+    if now >= room.deadline:
+        _mark_round_ended(room, now, "timer")
+        return
+    current = [sub for sub in room.submissions if sub.round_no == room.current_round]
+    latest = {sub.slot: sub for sub in current}
+    if (all(slot in latest for slot in (1, 2)) and
+            all(sub.status != "analyzing" for sub in current)):
+        _mark_round_ended(room, now, "both_resolved")
+
+
+def _resolve_submission(room: Room, sub: Submission, status: str, reason: str,
+                        detected_object: str = "") -> bool:
+    # Called under the existing room lock by every AI provider/timeout path.
+    if sub.status != "analyzing":
+        return False
+    if status not in {"correct", "incorrect", "unverified"}:
+        raise ValueError("Unsupported terminal AI status")
+    room.result_sequence += 1
+    sub.status, sub.reason, sub.detected_object = status, reason, detected_object
+    sub.resolved_at, sub.resolution_order = time.time(), room.result_sequence
+    sub.ai_claim, sub.ai_leased_until = "", 0.0
+    _recompute_scores(room)
+    _close_two_player_round_if_ready(room, sub.resolved_at)
+    return True
+
+
+def _round_result(room: Room, round_no: int) -> dict:
+    current = [sub for sub in room.submissions if sub.round_no == round_no]
+    latest = {sub.slot: sub for sub in current}
+    closed = room.closed_rounds.get(round_no, {})
+    start = closed.get("start_at", room.start_at if round_no == room.current_round else 0)
+    winner = room.round_winners.get(round_no, 0)
+    finalized = bool(closed) and not any(sub.status == "analyzing" for sub in current)
+    rows = []
+    for slot in range(1, room.size + 1):
+        sub = latest.get(slot)
+        rows.append({
+            "slot": slot, "submitted": sub is not None,
+            "submission_id": sub.id if sub else "",
+            "photo_url": f"/media/{room.id}/{sub.id}.jpg" if sub else "",
+            "status": sub.status if sub else "missing",
+            "reason": sub.reason if sub else "No photo submitted",
+            "submitted_at": sub.created_at if sub else 0,
+            "submitted_seconds": max(0, sub.created_at - start) if sub else 0,
+            "resolved_at": sub.resolved_at if sub else 0,
+            "resolution_order": sub.resolution_order if sub else 0,
+            "round_points": (100 if slot == winner else 0) if room.size == 2
+                            else sum(s.award for s in current if s.slot == slot),
+        })
+    return {
+        "round": round_no, "winner_slot": winner, "finalized": finalized,
+        "ended_at": closed.get("ended_at", 0),
+        "end_reason": closed.get("end_reason", ""),
+        "results_ready_at": max([closed.get("ended_at", 0)] +
+                                [s.resolved_at for s in current]) if finalized else 0,
+        "players": rows,
+    }
 
 
 def _advance(room: Room) -> None:
@@ -255,16 +354,13 @@ def _advance(room: Room) -> None:
     if AI_PROVIDER == "local":
         for sub in room.submissions:
             if sub.status == "analyzing" and now - sub.created_at > AI_PENDING_TIMEOUT:
-                sub.status = "unverified"
-                sub.reason = "AI analysis timed out; please retry"
-                sub.ai_claim = ""
-                sub.ai_leased_until = 0.0
+                _resolve_submission(room, sub, "unverified", "AI analysis timed out; please retry")
     if room.state == "countdown" and now >= room.start_at:
         room.state = "round_active"
         room.deadline = room.start_at + room.active_seconds
     if room.state == "round_active" and now >= room.deadline:
-        room.state = "round_review"
-        room.review_end = now + 7
+        _mark_round_ended(room, now, "timer")
+    _close_two_player_round_if_ready(room, now)
     # Intentionally do not auto-progress to the next round: Unity owns it.
 
 
@@ -301,6 +397,8 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
             "approved": True if s.status == "correct" else False if s.status == "incorrect" else None,
             "detected_object": s.detected_object,
             "award": s.award, "created_at": s.created_at,
+            "submission_id": s.id, "resolved_at": s.resolved_at,
+            "resolution_order": s.resolution_order,
         }
     result = {
         "room_id": room.id, "state": room.state, "capacity": room.size,
@@ -314,6 +412,9 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
         "ai_provider": AI_PROVIDER,
         "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30),
         "control": "unity", "catalog_size": len(CATALOG),
+        "gameplay_rules": "two_player_submission_order_v1" if room.size == 2 else "legacy_multiplayer",
+        "round_result": _round_result(room, room.current_round) if room.current_round else None,
+        "round_results": [_round_result(room, r) for r in sorted(room.closed_rounds)],
     }
     if is_host:
         result["general_join_path"] = f"/join?room={room.id}&token={room.auto_token}"
@@ -465,6 +566,10 @@ def finish_match(room_id: str, payload: HostRequest):
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
+        if room.size == 2 and room.state != "finished" and not (
+                room.current_round == room.rounds and room.state == "round_review" and
+                _round_result(room, room.current_round)["finalized"]):
+            raise HTTPException(409, "Wait for the final round and all AI results")
         room.state = "finished"
         return _snapshot(room, True)
 
@@ -494,6 +599,9 @@ def reset_room(room_id: str, payload: HostRequest):
         room.active_seconds = room.seconds
         room.players.clear()
         room.submissions.clear()
+        room.result_sequence = 0
+        room.round_winners.clear()
+        room.closed_rounds.clear()
         room.slot_tokens = {i: secrets.token_urlsafe(24) for i in range(1, room.size + 1)}
         room.auto_token = secrets.token_urlsafe(24)
         room.challenge_order = _new_challenge_order(room.rounds, room.catalog_mode)
@@ -526,11 +634,7 @@ def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_descr
         if room:
             sub = next((v for v in room.submissions if v.id == submission_id), None)
             if sub and sub.status == "analyzing":
-                sub.status = result.status
-                sub.reason = result.reason
-                sub.detected_object = result.detected_object
-                # Recompute using the original server receipt time, NOT when AI finished.
-                _recompute_scores(room)
+                _resolve_submission(room, sub, result.status, result.reason, result.detected_object)
 
 
 @app.post("/api/rooms/{room_id}/photos")
@@ -560,7 +664,7 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
         (MEDIA_DIR / f"{room.id}_{submission.id}.jpg").write_bytes(jpg)
         room.submissions.append(submission)
         if not _ai_configured():
-            submission.status, submission.reason = "unverified", "AI verification not configured"
+            _resolve_submission(room, submission, "unverified", "AI verification not configured")
         elif AI_PROVIDER == "local":
             # The local worker will claim this queued submission via authenticated HTTPS polling.
             # Do NOT try connecting from Render to localhost or Ollama's port 11434.
@@ -618,8 +722,7 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
                     img.convert("RGB").save(ai_buf, "JPEG", quality=78)
                     ai_jpg = ai_buf.getvalue()
             except (OSError, ValueError, UnidentifiedImageError):
-                sub.status = "unverified"
-                sub.reason = "Photo unavailable for AI verification"
+                _resolve_submission(room, sub, "unverified", "Photo unavailable for AI verification")
                 continue
             sub.ai_claim = secrets.token_urlsafe(32)
             sub.ai_leased_until = now + AI_CLAIM_SECONDS
@@ -646,12 +749,9 @@ def ai_submit_result(room_id: str, submission_id: str, result: AIWorkerResult,
             raise HTTPException(409, "Job already completed or claim expired")
         if time.time() > sub.ai_leased_until:
             raise HTTPException(409, "AI worker claim expired; result ignored")
-        sub.status = result.status
-        sub.reason = result.reason or ("Object verified" if result.status == "correct" else "Not verified")
-        sub.detected_object = result.detected_object
-        sub.ai_claim = ""
-        sub.ai_leased_until = 0.0
-        _recompute_scores(room)
+        _resolve_submission(room, sub, result.status,
+                            result.reason or ("Object verified" if result.status == "correct" else "Not verified"),
+                            result.detected_object)
         return {"ok": True, "status": sub.status, "award": sub.award}
 
 
@@ -717,3 +817,4 @@ def catalog_stats():
             "distinct_object_target": CATALOG_DATA["target_distinct_objects"],
             "categories": categories,
             "note": CATALOG_DATA["note"]}
+
