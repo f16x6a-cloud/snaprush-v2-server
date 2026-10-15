@@ -56,27 +56,47 @@ assert len(CATALOG) == len(CATALOG_INDEX) == CATALOG_DATA["count"]
 assert all(item.get("kind") == "object" and not item.get("color") for item in CATALOG_ITEMS)
 
 
-def _new_challenge_order(rounds: int, mode: str = "mixed") -> list[int]:
-    """Draw unique, safer household objects with availability-aware weighting.
+# SNAP RUSH party mode: keep the complete 3,042-item catalog available, but
+# draw from a small, hand-picked pool of everyday objects in the default mode.
+# Matching by exact English label retains every existing Unity target_id.
+EASY_CHALLENGE_NAMES = (
+    "coffee mug", "drinking glass", "dinner plate", "tablespoon", "dinner fork",
+    "water bottle", "TV remote control", "air conditioner remote", "smartphone",
+    "phone charger", "ballpoint pen", "pencil", "notebook", "toothbrush",
+    "toothpaste tube", "bath towel", "hand soap bar", "tissue box", "socks",
+    "sneaker", "T-shirt", "baseball cap", "backpack", "wallet",
+    "sunglasses", "prescription glasses", "hair comb", "hairbrush",
+    "sleeping pillow", "throw blanket", "wall clock", "wall mirror",
+    "table lamp", "paper scissors", "apple", "banana", "orange", "lemon",
+    "potato", "tomato", "cucumber", "onion", "carrot", "egg carton",
+    "cereal box", "potato chips bag", "milk carton", "watermelon",
+    "school backpack", "hand towel", "door key", "car key",
+    "computer mouse", "computer keyboard", "television", "analog wristwatch",
+    "rice bag", "plastic cup", "tea box", "shoe rack", "soap dispenser",
+    "bookshelf",
+)
+_EASY_NAME_SET = set(EASY_CHALLENGE_NAMES)
+_EASY_CANDIDATES = [i for i, item in enumerate(CATALOG_ITEMS)
+                    if item["en"] in _EASY_NAME_SET
+                    and item.get("safety", "general") == "general"]
+assert len(_EASY_CANDIDATES) == len(EASY_CHALLENGE_NAMES), "Easy challenge catalog missing an item"
 
-    `mixed` prioritizes objects that an average household might have.
-    `all`/`objects` allow the broader (nonhazardous) catalog.
-    This does not modify any legacy target identifiers used by Unity.
+
+def _new_challenge_order(rounds: int, mode: str = "mixed") -> list[int]:
+    """Select easy, recognizable targets in normal gameplay.
+
+    The 3,042-item catalog and all existing target IDs remain unchanged.
+    'mixed' (Unity's default) uses curated easy home items.
+    'all'/'objects' deliberately allow the full general-safety object catalog.
     """
-    eligible = [(i, item) for i, item in enumerate(CATALOG_ITEMS)
-                if item.get("safety", "general") == "general"]
-    if rounds < 1 or rounds > len(eligible):
-        raise ValueError("Round count exceeds the safe object pool")
-    rng = random.SystemRandom()
     if mode == "mixed":
-        availability_weight = {"common": 12.0, "occasional": 3.5, "specialty": 0.25}
-        weighted = []
-        for i, item in eligible:
-            factor = availability_weight.get(item.get("availability", "occasional"), 2.0)
-            weighted.append((rng.random() ** (1.0 / factor), i))
-        weighted.sort(reverse=True)
-        return [i for _, i in weighted[:rounds]]
-    return rng.sample([i for i, _ in eligible], rounds)
+        eligible_indices = _EASY_CANDIDATES
+    else:
+        eligible_indices = [i for i, item in enumerate(CATALOG_ITEMS)
+                            if item.get("safety", "general") == "general"]
+    if not 1 <= rounds <= len(eligible_indices):
+        raise ValueError("Round count exceeds the available object pool")
+    return random.SystemRandom().sample(eligible_indices, rounds)
 
 
 app = FastAPI(title="SNAP RUSH — Unity-controlled Camera Service", version="0.2.0")
@@ -310,9 +330,17 @@ def join_page():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "snaprush", "version": app.version,
-            "ai_configured": _ai_configured(), "ai_provider": AI_PROVIDER,
-            "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30)}
+    # Status counters reveal whether a worker is merely polling or actually
+    # processing photographs. No keys, photos or player data are returned.
+    with _lock:
+        now = time.time()
+        pending = [sub for room in _rooms.values() for sub in room.submissions
+                   if sub.status == "analyzing"]
+        return {"status": "ok", "service": "snaprush", "version": app.version,
+                "ai_configured": _ai_configured(), "ai_provider": AI_PROVIDER,
+                "ai_worker_online": AI_PROVIDER == "local" and (now - _ai_worker_last_seen < 30),
+                "ai_jobs_waiting": sum(now >= sub.ai_leased_until for sub in pending),
+                "ai_jobs_processing": sum(now < sub.ai_leased_until for sub in pending)}
 
 
 @app.post("/api/rooms")
@@ -561,8 +589,16 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
         for _, room, sub in queued:
             image_path = MEDIA_DIR / f"{room.id}_{sub.id}.jpg"
             try:
-                jpg = image_path.read_bytes()
-            except OSError:
+                # Keep the original 1024px server photo for Unity display.
+                # Send a smaller 640px variant only to local Ollama, to reduce
+                # vision tokens and processing time on the RTX 3060.
+                with Image.open(image_path) as img:
+                    img = ImageOps.exif_transpose(img)
+                    img.thumbnail((640, 640), Image.Resampling.LANCZOS)
+                    ai_buf = BytesIO()
+                    img.convert("RGB").save(ai_buf, "JPEG", quality=78)
+                    ai_jpg = ai_buf.getvalue()
+            except (OSError, ValueError, UnidentifiedImageError):
                 sub.status = "unverified"
                 sub.reason = "Photo unavailable for AI verification"
                 continue
@@ -571,7 +607,7 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
             return {"job": {
                 "room_id": room.id, "submission_id": sub.id,
                 "claim_id": sub.ai_claim, "target_description": sub.target_description,
-                "image_base64": base64.b64encode(jpg).decode("ascii"),
+                "image_base64": base64.b64encode(ai_jpg).decode("ascii"),
             }}
         return {"job": None}
 
