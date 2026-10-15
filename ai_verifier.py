@@ -1,4 +1,4 @@
-"""Real image-based verdicts for SNAP RUSH.
+"""OpenAI fallback verifier for SNAP RUSH (used only when SNAPRUSH_AI_PROVIDER=openai).
 
 This module runs only on the FastAPI server, not on players' phones or in Unity.
 Never place OPENAI_API_KEY in Git or a client build.

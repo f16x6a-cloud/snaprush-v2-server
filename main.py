@@ -34,6 +34,17 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 POINTS = [100, 70, 40, 20, 0, 0]
 ROOM_TTL = 2 * 60 * 60
+# Local AI workers poll Render over HTTPS; Ollama stays on 127.0.0.1.
+# OPENAI mode is kept for backward compatibility until you explicitly select local.
+AI_PROVIDER = os.getenv("SNAPRUSH_AI_PROVIDER", "openai").strip().lower()
+AI_PENDING_TIMEOUT = 240  # seconds: fail safely so a broken/offline PC never traps a round
+AI_CLAIM_SECONDS = 180  # long enough for a single Ollama image request
+
+
+def _ai_configured() -> bool:
+    if AI_PROVIDER == "local":
+        return len(os.getenv("SNAPRUSH_AI_WORKER_KEY", "")) >= 32
+    return bool(os.getenv("OPENAI_API_KEY"))
 
 # Object-only bilingual catalog. Color variants intentionally excluded.
 # Keep the CATALOG tuple format and target IDs unchanged for Unity compatibility.
@@ -72,6 +83,7 @@ app = FastAPI(title="SNAP RUSH — Unity-controlled Camera Service", version="0.
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _lock = threading.RLock()
 _rooms: dict[str, "Room"] = {}
+_ai_worker_last_seen: float = 0.0
 
 
 @dataclass
@@ -93,6 +105,9 @@ class Submission:
     reason: str = ""
     award: int = 0
     detected_object: str = ""
+    target_description: str = ""  # snapshotted at upload so changing rounds cannot change a job
+    ai_claim: str = ""  # per-claim random token prevents stale/duplicate worker results
+    ai_leased_until: float = 0.0
 
 
 @dataclass
@@ -208,6 +223,14 @@ def _advance(room: Room) -> None:
     Unity is the only caller allowed to choose when a new round starts.
     """
     now = time.time()
+    # Never keep the lobby waiting forever if a local worker is disconnected.
+    if AI_PROVIDER == "local":
+        for sub in room.submissions:
+            if sub.status == "analyzing" and now - sub.created_at > AI_PENDING_TIMEOUT:
+                sub.status = "unverified"
+                sub.reason = "AI analysis timed out; please retry"
+                sub.ai_claim = ""
+                sub.ai_leased_until = 0.0
     if room.state == "countdown" and now >= room.start_at:
         room.state = "round_active"
         room.deadline = room.start_at + room.active_seconds
@@ -259,7 +282,9 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
         "deadline": room.deadline, "server_now": time.time(),
         "target": {"id": current[0], "ar": current[1], "en": current[2]} if current and room.state in ("round_active", "round_review", "finished") else None,
         "slots": slots, "photos": list(latest.values()),
-        "ai_enabled": bool(os.getenv("OPENAI_API_KEY")),
+        "ai_enabled": _ai_configured(),
+        "ai_provider": AI_PROVIDER,
+        "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30),
         "control": "unity", "catalog_size": len(CATALOG),
     }
     if is_host:
@@ -285,7 +310,9 @@ def join_page():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "snaprush", "version": app.version, "ai_configured": bool(os.getenv("OPENAI_API_KEY"))}
+    return {"status": "ok", "service": "snaprush", "version": app.version,
+            "ai_configured": _ai_configured(), "ai_provider": AI_PROVIDER,
+            "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30)}
 
 
 @app.post("/api/rooms")
@@ -479,16 +506,98 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
             raise HTTPException(409, "You already submitted a correct photo")
         if any(s.status == "analyzing" for s in current):
             raise HTTPException(409, "Wait for your previous photo to finish analyzing")
-        submission = Submission(id=secrets.token_hex(16), slot=player.slot, round_no=room.current_round, created_at=time.time())
+        target = room.current_target()
+        submission = Submission(id=secrets.token_hex(16), slot=player.slot,
+                                round_no=room.current_round, created_at=time.time(),
+                                target_description=target[3])
         (MEDIA_DIR / f"{room.id}_{submission.id}.jpg").write_bytes(jpg)
         room.submissions.append(submission)
-        target = room.current_target()
-        if not os.getenv("OPENAI_API_KEY"):
+        if not _ai_configured():
             submission.status, submission.reason = "unverified", "AI verification not configured"
+        elif AI_PROVIDER == "local":
+            # The local worker will claim this queued submission via authenticated HTTPS polling.
+            # Do NOT try connecting from Render to localhost or Ollama's port 11434.
+            pass
         else:
             background_tasks.add_task(_analyze_photo, room.id, submission.id, jpg, target[3])
         return {"ok": True, "submission_id": submission.id, "status": submission.status,
                 "photo_url": f"/media/{room.id}/{submission.id}.jpg", "slot": player.slot}
+
+
+# Authenticated pull-queue for a desktop-based Ollama worker.
+# All requests are outgoing from the PC to Render; no inbound home network access.
+def _require_ai_worker(x_ai_worker_key: str) -> None:
+    expected = os.getenv("SNAPRUSH_AI_WORKER_KEY", "")
+    if AI_PROVIDER != "local":
+        raise HTTPException(404, "Local AI mode disabled")
+    if len(expected) < 32 or not x_ai_worker_key or not secrets.compare_digest(x_ai_worker_key, expected):
+        raise HTTPException(401, "Invalid AI worker credentials")
+
+
+class AIWorkerResult(BaseModel):
+    claim_id: str
+    status: Literal["correct", "incorrect", "unverified"]
+    reason: str = Field(default="", max_length=160)
+    detected_object: str = Field(default="", max_length=90)
+
+
+@app.get("/api/ai/jobs/next")
+def ai_next_job(x_ai_worker_key: str = Header(default="")):
+    global _ai_worker_last_seen
+    _require_ai_worker(x_ai_worker_key)
+    with _lock:
+        now = time.time()
+        _ai_worker_last_seen = now
+        # Search by original receipt time, not claim time, to preserve fairness.
+        queued = []
+        for room in _rooms.values():
+            if now - room.created_at > ROOM_TTL:
+                continue
+            _advance(room)
+            for sub in room.submissions:
+                if sub.status == "analyzing" and now >= sub.ai_leased_until:
+                    queued.append((sub.created_at, room, sub))
+        queued.sort(key=lambda value: value[0])
+        for _, room, sub in queued:
+            image_path = MEDIA_DIR / f"{room.id}_{sub.id}.jpg"
+            try:
+                jpg = image_path.read_bytes()
+            except OSError:
+                sub.status = "unverified"
+                sub.reason = "Photo unavailable for AI verification"
+                continue
+            sub.ai_claim = secrets.token_urlsafe(32)
+            sub.ai_leased_until = now + AI_CLAIM_SECONDS
+            return {"job": {
+                "room_id": room.id, "submission_id": sub.id,
+                "claim_id": sub.ai_claim, "target_description": sub.target_description,
+                "image_base64": base64.b64encode(jpg).decode("ascii"),
+            }}
+        return {"job": None}
+
+
+@app.post("/api/ai/jobs/{room_id}/{submission_id}/result")
+def ai_submit_result(room_id: str, submission_id: str, result: AIWorkerResult,
+                     x_ai_worker_key: str = Header(default="")):
+    global _ai_worker_last_seen
+    _require_ai_worker(x_ai_worker_key)
+    with _lock:
+        _ai_worker_last_seen = time.time()
+        room = _get_room(room_id)
+        sub = next((s for s in room.submissions if s.id == submission_id), None)
+        if sub is None:
+            raise HTTPException(404, "Unknown photo job")
+        if sub.status != "analyzing" or not sub.ai_claim or not secrets.compare_digest(sub.ai_claim, result.claim_id):
+            raise HTTPException(409, "Job already completed or claim expired")
+        if time.time() > sub.ai_leased_until:
+            raise HTTPException(409, "AI worker claim expired; result ignored")
+        sub.status = result.status
+        sub.reason = result.reason or ("Object verified" if result.status == "correct" else "Not verified")
+        sub.detected_object = result.detected_object
+        sub.ai_claim = ""
+        sub.ai_leased_until = 0.0
+        _recompute_scores(room)
+        return {"ok": True, "status": sub.status, "award": sub.award}
 
 
 @app.get("/media/{room_id}/{submission_id}.jpg")
