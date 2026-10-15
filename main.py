@@ -273,7 +273,11 @@ def _mark_round_ended(room: Room, now: float, reason: str) -> None:
     if room.state != "round_active":
         return
     room.state = "round_review"
-    room.review_end = now + 7
+    room.review_end = now + 5
+    # Every next round requires a NEW Ready press in Unity from each player.
+    # Previous round's Ready flags must never carry forward.
+    for player in room.players.values():
+        player.ready = False
     room.closed_rounds[room.current_round] = {
         "start_at": room.start_at, "deadline": room.deadline,
         "ended_at": min(now, room.deadline) if reason == "timer" else now,
@@ -400,9 +404,17 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
             "submission_id": s.id, "resolved_at": s.resolved_at,
             "resolution_order": s.resolution_order,
         }
+    current_result = _round_result(room, room.current_round) if room.current_round else None
+    # Clients may show an explicit Ready UI ONLY after the result reveal is complete.
+    next_round_ready = (room.state == "round_review" and room.current_round < room.rounds
+                        and time.time() >= room.review_end
+                        and current_result is not None and current_result["finalized"])
     result = {
         "room_id": room.id, "state": room.state, "capacity": room.size,
         "connected": len(room.players), "ready_count": sum(p.ready for p in room.players.values()),
+        "ready_phase": "next_round" if next_round_ready else ("lobby" if room.state == "waiting" else "none"),
+        "can_ready_next_round": next_round_ready,
+        "review_end": room.review_end,
         "rounds": room.rounds, "seconds": room.active_seconds,
         "round": room.current_round, "start_at": room.start_at,
         "deadline": room.deadline, "server_now": time.time(),
@@ -413,7 +425,7 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
         "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30),
         "control": "unity", "catalog_size": len(CATALOG),
         "gameplay_rules": "two_player_submission_order_v1" if room.size == 2 else "legacy_multiplayer",
-        "round_result": _round_result(room, room.current_round) if room.current_round else None,
+        "round_result": current_result,
         "round_results": [_round_result(room, r) for r in sorted(room.closed_rounds)],
     }
     if is_host:
@@ -516,8 +528,14 @@ def host_player_ready(room_id: str, payload: HostPlayerReady):
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
-        if room.state != "waiting":
-            raise HTTPException(409, "Ready can only change while waiting")
+        if room.state == "waiting":
+            pass  # Initial lobby Ready.
+        elif room.state == "round_review" and room.current_round < room.rounds:
+            result = _round_result(room, room.current_round)
+            if time.time() < room.review_end or not result["finalized"]:
+                raise HTTPException(409, "Wait for the round results before marking Ready")
+        else:
+            raise HTTPException(409, "Ready is only available in the lobby or between rounds")
         p = room.players.get(payload.slot)
         if p is None:
             raise HTTPException(404, "Player slot has not joined")
@@ -538,13 +556,20 @@ def start_round(room_id: str, payload: HostStartRound):
             raise HTTPException(409, "Finish or review the current round before starting another")
         if room.current_round >= room.rounds:
             raise HTTPException(409, "All configured rounds are complete")
-        if room.state == "waiting" and (len(room.players) < 2 or not all(p.ready for p in room.players.values())):
-            raise HTTPException(409, "At least two connected players must be marked Ready by the Unity lobby")
-        if room.state == "round_review" and any(
-            s.status == "analyzing" and s.round_no == room.current_round
-            for s in room.submissions
-        ):
-            raise HTTPException(409, "Wait for pending image analysis before continuing")
+        if room.state == "waiting":
+            if len(room.players) != room.size or not all(p.ready for p in room.players.values()):
+                raise HTTPException(409, "Every connected player must be Ready before the first round")
+        else:
+            # Even a Unity client that mistakenly auto-calls start-round cannot
+            # skip Ready: the server rejects it until every player explicitly
+            # confirms the NEXT round via the host/player-ready endpoint.
+            last_result = _round_result(room, room.current_round)
+            if not last_result["finalized"]:
+                raise HTTPException(409, "Wait for pending image analysis before continuing")
+            if time.time() < room.review_end:
+                raise HTTPException(409, "Wait until the round result display finishes")
+            if len(room.players) != room.size or not all(p.ready for p in room.players.values()):
+                raise HTTPException(409, "All players must press Ready again before the next round")
         next_round = room.current_round + 1
         if payload.target_id is not None:
             match_index = CATALOG_INDEX.get(payload.target_id)
@@ -650,13 +675,12 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
         player = _auth_player(room, session)
         if room.state != "round_active" or time.time() >= room.deadline:
             raise HTTPException(409, "There is no active photo challenge")
-        current = [s for s in room.submissions if s.round_no == room.current_round and s.slot == player.slot]
-        if len(current) >= 3:
-            raise HTTPException(429, "Maximum 3 photos per round")
-        if any(s.status == "correct" for s in current):
-            raise HTTPException(409, "You already submitted a correct photo")
-        if any(s.status == "analyzing" for s in current):
-            raise HTTPException(409, "Wait for your previous photo to finish analyzing")
+        # One submission per player per round, regardless of AI verdict. This
+        # check occurs under _lock and stays enforced after reload/reconnect.
+        # No second upload can sneak through while the first is being analyzed.
+        if any(s.round_no == room.current_round and s.slot == player.slot
+               for s in room.submissions):
+            raise HTTPException(409, "Only one photo is allowed per player per round")
         target = room.current_target()
         submission = Submission(id=secrets.token_hex(16), slot=player.slot,
                                 round_no=room.current_round, created_at=time.time(),
