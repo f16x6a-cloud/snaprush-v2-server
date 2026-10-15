@@ -7,7 +7,41 @@ const token = params.get('token');
 const localKey = 'snaprush_camera_session_' + (roomId || 'unknown');
 let current = null;
 try { current = JSON.parse(localStorage.getItem(localKey) || 'null'); } catch { localStorage.removeItem(localKey); }
-let state = null, stream = null, facing = 'user', uploading = false, polling = false;
+let state = null, stream = null, facing = 'environment', uploading = false, polling = false;
+// Anchor to the authoritative server epoch using monotonic time on this device.
+let clockServerAtSync = 0, clockMonotonicAtSync = 0;
+function estimatedServerTime() {
+  return clockServerAtSync + (performance.now() - clockMonotonicAtSync) / 1000;
+}
+function secondsRemaining() {
+  return state?.state === 'round_active'
+    ? Math.max(0, Math.ceil(Number(state.deadline) - estimatedServerTime())) : 0;
+}
+function displayRoundClock() {
+  const meta = $('#roundMeta'), face = $('#roundTimer'), bar = $('#roundProgress');
+  if (!state) {meta.textContent='بانتظار اتصال Unity';face.textContent='--:--';bar.style.width='0%';return;}
+  const round = Number(state.round) || 0;
+  const total = Number(state.rounds) || 0;
+  meta.textContent = round ? 'الجولة '+round+' / '+total : 'بانتظار بداية الجولة';
+  let remaining = 0;
+  if (state.state === 'countdown') {
+    remaining = Math.max(0, Math.ceil(Number(state.start_at) - estimatedServerTime()));
+    face.textContent = remaining ? 'تبدأ خلال '+remaining : 'انطلق!';
+    bar.style.width = '100%';
+  } else if (state.state === 'round_active') {
+    remaining = secondsRemaining();
+    face.textContent = String(Math.floor(remaining/60)).padStart(2,'0') + ':' + String(remaining%60).padStart(2,'0');
+    const maxTime = Math.max(1, Number(state.seconds) || 60);
+    bar.style.width = Math.min(100,remaining/maxTime*100) + '%';
+  } else {
+    face.textContent = state.state === 'round_review' || state.state === 'finished' ? '00:00' : '--:--';
+    bar.style.width='0%';
+  }
+  const expired = state.state !== 'round_active' || secondsRemaining() <= 0;
+  $('#snap').disabled = expired || !stream || uploading;
+  face.classList.toggle('urgent',state.state==='round_active' && remaining <= 10);
+}
+
 const statuses = {
   analyzing: ['⏳ جاري تحليل الصورة', 'تحليلك بدأ والصورة وصلت للعبة'],
   correct: ['✅ صورة صحيحة!', 'تم احتساب النقاط في اللعبة'],
@@ -53,8 +87,11 @@ async function connect() {
     await tick();
   } catch (e) { setConnected(false); $('#playerNumber').textContent='TRY AGAIN'; $('#statusLine').textContent=e.message; notice(e.message); }
 }
-function render(s) {
+function render(s, rttMs=0) {
   state = s;
+  clockServerAtSync = Number(s.server_now) + Math.max(0,rttMs)/2000;
+  clockMonotonicAtSync = performance.now();
+  displayRoundClock();
   const active = s.state === 'round_active';
   const messages = {
     waiting:'جاهز للتصوير. انتظر بداية التحدي داخل اللعبة.',
@@ -64,7 +101,7 @@ function render(s) {
     finished:'🏆 انتهت المباراة. تقدر تغلق الكاميرا.'
   };
   $('#statusLine').textContent=messages[s.state] || 'متصل باللعبة';
-  $('#snap').disabled=!active || !stream || uploading;
+  $('#snap').disabled=!active || secondsRemaining()===0 || !stream || uploading;
   $('#flip').disabled=!stream || uploading;
   const shot=s.photos.find(p=>p.slot===current.slot);
   const container=$('#myPhoto');
@@ -88,7 +125,12 @@ function render(s) {
 async function tick() {
   if (!current || polling) return;
   polling=true;
-  try { const s=await api('/api/rooms/'+current.room_id+'/state', {headers:{'x-session':current.session}});render(s);setConnected(true); }
+  try {
+    const began=performance.now();
+    const s=await api('/api/rooms/'+current.room_id+'/state', {headers:{'x-session':current.session}});
+    render(s, performance.now()-began);
+    setConnected(true);
+  }
   catch(e) {setConnected(false); $('#statusLine').textContent='انقطع الاتصال، نحاول مجددًا...';notice(e.message);}
   finally {polling=false;}
 }
@@ -116,7 +158,7 @@ async function startCamera() {
 }
 async function uploadBlob(blob) {
   if (!current || uploading) return;
-  if (state?.state!=='round_active') {notice('انتظر Unity يبدأ التحدي قبل التصوير.');return;}
+  if (state?.state!=='round_active' || secondsRemaining()===0) {notice('انتهى وقت الجولة أو لم تبدأ بعد.');return;}
   uploading=true;$('#snap').disabled=true;
   notice('⏳ جاري إرسال الصورة إلى اللعبة...');
   try {
@@ -148,4 +190,4 @@ $('#leave').addEventListener('click',async()=>{
   location.assign('/');
 });
 window.addEventListener('pagehide',stopCamera);
-connect();setInterval(tick,1200);
+connect();setInterval(tick,1200);setInterval(displayRoundClock,200);

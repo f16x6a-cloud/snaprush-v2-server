@@ -29,3 +29,11 @@ button:focus-visible{outline:3px solid var(--cyan);outline-offset:3px}
 .leave-button{display:block;margin:19px auto 0;background:#311d37;color:#ffb4d4;border:1px solid #6a3d5a;border-radius:13px;padding:13px 20px;font-size:14px;font-weight:800}.privacy-note{text-align:center;color:#7e91b5;font-size:12px;margin:20px auto 0;line-height:1.5}.toast{text-align:center;color:#ffdca7;font-size:13px;font-weight:800;min-height:26px;line-height:1.6;margin-top:10px}
 @media(max-width:360px){.phone-shell{padding:13px 10px 40px}.camera-intro h1{font-size:24px}.action-button{font-size:16px}.camera-viewport{aspect-ratio:3/4}.identity-panel{padding:14px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important;animation:none!important}}
+
+/* SNAP RUSH: phone round time mirrors Unity's server-authoritative deadline. */
+.round-clock{background:#10182f;border:1px solid #384e70;border-radius:16px;padding:12px 14px;margin-bottom:12px}
+.clock-line{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13px;font-weight:800;color:#c9d7ef}
+#roundTimer{font:900 26px 'Barlow Condensed',Impact,Arial,sans-serif;color:var(--yellow);white-space:nowrap;letter-spacing:1px}
+#roundTimer.urgent{color:#ff667b}
+.clock-track{height:5px;background:#283956;border-radius:10px;overflow:hidden;margin-top:8px}
+#roundProgress{width:0;height:100%;background:linear-gradient(90deg,var(--pink),var(--yellow));border-radius:10px;transition:width .2s linear}
