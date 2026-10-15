@@ -8,6 +8,7 @@ const localKey = 'snaprush_camera_session_' + (roomId || 'unknown');
 let current = null;
 try { current = JSON.parse(localStorage.getItem(localKey) || 'null'); } catch { localStorage.removeItem(localKey); }
 let state = null, stream = null, facing = 'environment', uploading = false, polling = false;
+let captureInProgress = false, submittedRound = 0;
 // Anchor to the authoritative server epoch using monotonic time on this device.
 let clockServerAtSync = 0, clockMonotonicAtSync = 0;
 function estimatedServerTime() {
@@ -16,6 +17,19 @@ function estimatedServerTime() {
 function secondsRemaining() {
   return state?.state === 'round_active'
     ? Math.max(0, Math.ceil(Number(state.deadline) - estimatedServerTime())) : 0;
+}
+function alreadySubmitted() {
+  const currentRound = Number(state?.round) || 0;
+  if (!current || currentRound < 1) return false;
+  return submittedRound === currentRound || !!state?.photos?.some(p => p.slot === current.slot);
+}
+function canSubmitPhoto() {
+  return !!current && !!state && state.state === 'round_active' && secondsRemaining() > 0 &&
+    !alreadySubmitted() && !uploading && !captureInProgress;
+}
+function updateCaptureControls() {
+  $('#snap').disabled = !canSubmitPhoto() || !stream;
+  $('#useSystemCamera').disabled = !canSubmitPhoto();
 }
 function displayRoundClock() {
   const meta = $('#roundMeta'), face = $('#roundTimer'), bar = $('#roundProgress');
@@ -37,15 +51,14 @@ function displayRoundClock() {
     face.textContent = state.state === 'round_review' || state.state === 'finished' ? '00:00' : '--:--';
     bar.style.width='0%';
   }
-  const expired = state.state !== 'round_active' || secondsRemaining() <= 0;
-  $('#snap').disabled = expired || !stream || uploading;
+  updateCaptureControls();
   face.classList.toggle('urgent',state.state==='round_active' && remaining <= 10);
 }
 
 const statuses = {
   analyzing: ['⏳ جاري تحليل الصورة', 'تحليلك بدأ والصورة وصلت للعبة'],
   correct: ['✅ صورة صحيحة!', 'تم احتساب النقاط في اللعبة'],
-  incorrect: ['❌ الغرض غير مطابق', 'تقدر تعيد المحاولة خلال الجولة'],
+  incorrect: ['❌ الغرض غير مطابق', 'استخدمت فرصتك الوحيدة لهذه الجولة. انتظر الجولة التالية'],
   unverified: ['⚠️ التحليل غير متاح', 'الصورة وصلت للعبة، لكن لم يُحتسب لها نقاط']
 };
 function notice(message) { $('#toast').textContent = message; }
@@ -59,7 +72,7 @@ function setConnected(ok) {
   const chip = $('#connection'); chip.classList.toggle('online', !!ok);
   chip.lastChild.textContent = ok ? ' متصل باللعبة' : ' غير متصل';
   $('#openCamera').disabled = !ok;
-  $('#useSystemCamera').disabled = !ok;
+  $('#useSystemCamera').disabled = !ok || !canSubmitPhoto();
   $('#leave').disabled = !ok;
 }
 async function connect() {
@@ -97,11 +110,11 @@ function render(s, rttMs=0) {
     waiting:'جاهز للتصوير. انتظر بداية التحدي داخل اللعبة.',
     countdown:'اللوبي بدأ العد التنازلي! استعد للتصوير.',
     round_active:'⚡ التحدي شغّال! صوّر الغرض المطلوب وأرسل.',
-    round_review:'انتهت الجولة. انتظر التحدي التالي من اللوبي.',
+    round_review: s.can_ready_next_round ? 'بانتظار جاهزية اللاعبين في Unity لبدء الجولة التالية.' : 'انتهت الجولة. جاري عرض النتائج...',
     finished:'🏆 انتهت المباراة. تقدر تغلق الكاميرا.'
   };
-  $('#statusLine').textContent=messages[s.state] || 'متصل باللعبة';
-  $('#snap').disabled=!active || secondsRemaining()===0 || !stream || uploading;
+  $('#statusLine').textContent=alreadySubmitted() && active ? '📸 تم إرسال صورتك. صورة واحدة فقط لكل جولة.' : (messages[s.state] || 'متصل باللعبة');
+  updateCaptureControls();
   $('#flip').disabled=!stream || uploading;
   const shot=s.photos.find(p=>p.slot===current.slot);
   const container=$('#myPhoto');
@@ -158,31 +171,39 @@ async function startCamera() {
 }
 async function uploadBlob(blob) {
   if (!current || uploading) return;
-  if (state?.state!=='round_active' || secondsRemaining()===0) {notice('انتهى وقت الجولة أو لم تبدأ بعد.');return;}
-  uploading=true;$('#snap').disabled=true;
+  if (alreadySubmitted()) {notice('صورتك انرسلت بالفعل. مسموح بصورة واحدة في كل جولة.');return;}
+  if (state?.state !== 'round_active' || secondsRemaining() === 0) {notice('انتهى وقت الجولة أو لم تبدأ بعد.');return;}
+  const uploadRound = Number(state.round);
+  uploading=true;updateCaptureControls();
   notice('⏳ جاري إرسال الصورة إلى اللعبة...');
   try {
     const form=new FormData();form.append('session',current.session);form.append('file',blob,'snapshot.jpg');
     const result=await api('/api/rooms/'+current.room_id+'/photos',{method:'POST',body:form});
-    notice(result.status==='unverified' ? '📸 وصلت الصورة للعبة، لكن تحليل AI غير مفعّل.' : '📸 وصلت الصورة للعبة! جاري التحليل بالخلفية.');
+    submittedRound = uploadRound;
+    notice(result.status==='unverified' ? '📸 وصلت الصورة للعبة، لكن تحليل AI غير مفعّل.' : '📸 صورتك الوحيدة وصلت للعبة! انتظر نتيجة التحليل.');
     await tick();
-  } catch(e) {notice(e.message);}
+  } catch(e) {notice(e.message);await tick();}
   finally {uploading=false;if(state) render(state);}
 }
 function snap() {
-  if (!stream || uploading) return;
+  if (!stream || !canSubmitPhoto()) return;
   const video=$('#video');
   if (!video.videoWidth) {notice('الكاميرا لم تجهز بعد');return;}
   const ratio=Math.min(1,1280/Math.max(video.videoWidth,video.videoHeight));
   const canvas=document.createElement('canvas');canvas.width=Math.round(video.videoWidth*ratio);canvas.height=Math.round(video.videoHeight*ratio);
+  captureInProgress=true;
+  updateCaptureControls();
   canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
-  canvas.toBlob(blob=>{if(blob)uploadBlob(blob);else notice('تعذر إنشاء الصورة')},'image/jpeg',.82);
+  canvas.toBlob(blob=>{
+    if (!blob) {notice('تعذر إنشاء الصورة');captureInProgress=false;updateCaptureControls();return;}
+    uploadBlob(blob).finally(()=>{captureInProgress=false;updateCaptureControls();});
+  },'image/jpeg',.82);
 }
 $('#openCamera').addEventListener('click',startCamera);
 $('#snap').addEventListener('click',snap);
 $('#flip').addEventListener('click',()=>{facing=facing==='user'?'environment':'user';startCamera()});
-$('#useSystemCamera').addEventListener('click',()=>{$('#fallback').setAttribute('capture',facing);$('#fallback').click()});
-$('#fallback').addEventListener('change',(e)=>{const file=e.target.files?.[0];if(file)uploadBlob(file);e.target.value='';});
+$('#useSystemCamera').addEventListener('click',()=>{if(!canSubmitPhoto())return;$('#fallback').setAttribute('capture',facing);$('#fallback').click()});
+$('#fallback').addEventListener('change',(e)=>{const file=e.target.files?.[0];if(file && canSubmitPhoto())uploadBlob(file);e.target.value='';});
 $('#leave').addEventListener('click',async()=>{
   const old=current;stopCamera();if(!old)return;
   try {await api('/api/leave',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({room_id:old.room_id,session:old.session})})} catch{}
