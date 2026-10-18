@@ -11,13 +11,13 @@
       "en": "human hand",
       "category": "body_parts",
       "difficulty": "easy",
-      "kind": "body",
+      "kind": "object",
       "base_id": "body-hand",
       "color": null,
       "ai_description": "The requested subject is a real human hand, palm, or fingers. Any skin tone or pose is acceptable. Reject drawings, gloves without hand visible, or fake hands.",
       "aliases_en": ["hand", "fingers", "palm"],
-      "safety": "safe_body_part",
-      "availability": "immediate"
+      "safety": "general",
+      "availability": "common"
     },
     {
       "id": "body-human-foot",
@@ -25,13 +25,13 @@
       "en": "human foot or leg",
       "category": "body_parts",
       "difficulty": "easy",
-      "kind": "body",
+      "kind": "object",
       "base_id": "body-foot",
       "color": null,
       "ai_description": "The requested subject is a human foot, leg, ankle, or toes (bare or with socks). Must show a real human lower limb. Strictly reject full body photos showing faces.",
       "aliases_en": ["foot", "leg", "barefoot", "toes"],
-      "safety": "safe_body_part",
-      "availability": "immediate"
+      "safety": "general",
+      "availability": "common"
     },
     {
       "id": "body-human-hair",
@@ -39,13 +39,13 @@
       "en": "human hair",
       "category": "body_parts",
       "difficulty": "easy",
-      "kind": "body",
+      "kind": "object",
       "base_id": "body-hair",
       "color": null,
       "ai_description": "The requested subject is real human head hair. The photo should clearly focus on hair from the top, back, or side of the head. Do not require facial features. Reject synthetic wigs or pet fur.",
       "aliases_en": ["hair", "head hair"],
-      "safety": "safe_body_part",
-      "availability": "immediate"
+      "safety": "general",
+      "availability": "common"
     },
     {
       "id": "obj-computer-mouse",
@@ -59,7 +59,7 @@
       "ai_description": "The requested physical object is a computer mouse (wired or wireless). Reject animal mice, mouse pads without mouse, or screens displaying a mouse.",
       "aliases_en": ["pc mouse", "wireless mouse"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-computer-keyboard",
@@ -73,7 +73,7 @@
       "ai_description": "The requested physical object is a physical computer keyboard or laptop keyboard with visible keys.",
       "aliases_en": ["keyboard", "mechanical keyboard"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-smartphone",
@@ -87,7 +87,7 @@
       "ai_description": "The requested physical object is a smartphone or mobile phone. Screen can be on or off.",
       "aliases_en": ["mobile phone", "cellphone"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-tv-remote",
@@ -101,7 +101,7 @@
       "ai_description": "The requested physical object is a handheld television remote control with rubber buttons.",
       "aliases_en": ["remote control", "clicker"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-coffee-mug",
@@ -115,7 +115,7 @@
       "ai_description": "The requested physical object is a ceramic or glass drinking mug, teacup, or coffee cup with or without a handle.",
       "aliases_en": ["mug", "cup"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-metal-spoon",
@@ -129,7 +129,7 @@
       "ai_description": "The requested physical object is an eating or cooking spoon made of metal, wood, or plastic.",
       "aliases_en": ["tablespoon", "teaspoon"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-metal-fork",
@@ -143,7 +143,7 @@
       "ai_description": "The requested physical object is an eating fork with visible prongs.",
       "aliases_en": ["table fork"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-writing-pen",
@@ -157,7 +157,7 @@
       "ai_description": "The requested physical object is an ink pen or ballpoint pen. Any color casing.",
       "aliases_en": ["pen", "marker"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-house-key",
@@ -171,7 +171,7 @@
       "ai_description": "The requested physical object is a metallic door key or house key.",
       "aliases_en": ["key", "house key"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-car-key",
@@ -185,7 +185,7 @@
       "ai_description": "The requested physical object is a car key or modern remote key fob with lock/unlock icons.",
       "aliases_en": ["car key", "key fob"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-pillow",
@@ -199,7 +199,7 @@
       "ai_description": "The requested physical object is a soft bed pillow or couch cushion.",
       "aliases_en": ["cushion", "bed pillow"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-blanket",
@@ -213,7 +213,7 @@
       "ai_description": "The requested physical object is a bed blanket, quilt, or throw blanket.",
       "aliases_en": ["quilt", "comforter"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-slippers",
@@ -227,7 +227,7 @@
       "ai_description": "The requested physical object is an indoor slipper, flip-flop, or slide sandal.",
       "aliases_en": ["flip flops", "slides", "sandals"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-shoe",
@@ -241,7 +241,7 @@
       "ai_description": "The requested physical object is a sneaker, running shoe, or dress shoe.",
       "aliases_en": ["sneaker", "boot"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-sock",
@@ -255,7 +255,7 @@
       "ai_description": "The requested physical object is a fabric sock, whether worn on foot or laid flat.",
       "aliases_en": ["socks"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-tshirt",
@@ -269,7 +269,7 @@
       "ai_description": "The requested physical object is a short-sleeved cotton t-shirt.",
       "aliases_en": ["tee", "shirt"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-tissue-box",
@@ -283,7 +283,7 @@
       "ai_description": "The requested physical object is a cardboard box or dispenser of facial paper tissues.",
       "aliases_en": ["kleenex box", "paper tissues"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-water-bottle",
@@ -297,7 +297,7 @@
       "ai_description": "The requested physical object is a plastic or reusable metal water bottle.",
       "aliases_en": ["flask", "mineral water bottle"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-phone-charger",
@@ -311,7 +311,7 @@
       "ai_description": "The requested physical object is a phone charging cable (USB-C, Lightning) or power wall adapter block.",
       "aliases_en": ["charging cable", "usb cable"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-toothbrush",
@@ -325,7 +325,7 @@
       "ai_description": "The requested physical object is a manual or electric toothbrush with bristle head.",
       "aliases_en": ["dental brush"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-toothpaste",
@@ -339,7 +339,7 @@
       "ai_description": "The requested physical object is a tube of dental toothpaste.",
       "aliases_en": ["toothpaste"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-perfume-bottle",
@@ -353,7 +353,7 @@
       "ai_description": "The requested physical object is a glass cologne or perfume spray bottle with nozzle.",
       "aliases_en": ["cologne", "fragrance bottle"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-scissors",
@@ -367,7 +367,7 @@
       "ai_description": "The requested physical object is a pair of household or craft scissors with intersecting blades.",
       "aliases_en": ["shears"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-eyeglasses",
@@ -381,7 +381,7 @@
       "ai_description": "The requested physical object is a pair of optical reading glasses or sunglasses with visible frame and lenses.",
       "aliases_en": ["spectacles", "sunglasses"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-wristwatch",
@@ -395,7 +395,7 @@
       "ai_description": "The requested physical object is an analog, digital, or smart wristwatch with strap.",
       "aliases_en": ["smartwatch", "watch"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-wallet",
@@ -409,7 +409,7 @@
       "ai_description": "The requested physical object is a leather or fabric folding pocket wallet for cash and cards.",
       "aliases_en": ["billfold", "card holder"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-headphones",
@@ -423,7 +423,7 @@
       "ai_description": "The requested physical object is an over-ear headset or wireless earbuds/charging case.",
       "aliases_en": ["headset", "earphones", "airpods"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-frying-pan",
@@ -437,7 +437,7 @@
       "ai_description": "The requested physical object is a round flat cooking skillet or frying pan with extended handle.",
       "aliases_en": ["skillet"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-cooking-pot",
@@ -451,7 +451,7 @@
       "ai_description": "The requested physical object is a deep metal or non-stick cooking pot with two side handles.",
       "aliases_en": ["saucepan", "stewpot"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-wall-clock",
@@ -465,7 +465,7 @@
       "ai_description": "The requested physical object is a wall clock mounted on a wall with numbers or hands.",
       "aliases_en": ["analog clock"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-mirror",
@@ -479,7 +479,7 @@
       "ai_description": "The requested physical object is a glass wall mirror or vanity mirror showing real reflection.",
       "aliases_en": ["looking glass", "hand mirror"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-soap-bar",
@@ -493,7 +493,7 @@
       "ai_description": "The requested physical object is a solid bar of hand soap or body soap.",
       "aliases_en": ["bath soap"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-shampoo-bottle",
@@ -507,7 +507,7 @@
       "ai_description": "The requested physical object is a plastic bottle or dispenser of hair shampoo or body wash.",
       "aliases_en": ["body wash bottle"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-hair-comb",
@@ -521,7 +521,7 @@
       "ai_description": "The requested physical object is a flat plastic or wooden tooth comb for hair.",
       "aliases_en": ["comb", "hairbrush"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-towel",
@@ -535,7 +535,7 @@
       "ai_description": "The requested physical object is a cotton terrycloth towel hanging or folded.",
       "aliases_en": ["hand towel", "cloth towel"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-trash-bin",
@@ -549,7 +549,7 @@
       "ai_description": "The requested physical object is an indoor waste bin, trash can, or paper basket.",
       "aliases_en": ["trash can", "garbage bin"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-gamepad-controller",
@@ -563,7 +563,7 @@
       "ai_description": "The requested physical object is a console gamepad (PlayStation DualSense, Xbox, or Nintendo controller) with thumbsticks and d-pad.",
       "aliases_en": ["gamepad", "console controller"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-nail-clipper",
@@ -577,7 +577,7 @@
       "ai_description": "The requested physical object is a small metal lever-action nail clipper.",
       "aliases_en": ["nail trimmer"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-adhesive-tape",
@@ -591,7 +591,7 @@
       "ai_description": "The requested physical object is a round roll of duct tape, clear scotch tape, or masking tape.",
       "aliases_en": ["tape roll", "scotch tape"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-kitchen-knife",
@@ -605,7 +605,7 @@
       "ai_description": "The requested physical object is a chef knife or table butter knife resting on a surface.",
       "aliases_en": ["table knife"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-refrigerator",
@@ -619,7 +619,7 @@
       "ai_description": "The requested physical object is an upright household refrigerator or freezer.",
       "aliases_en": ["fridge"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-power-outlet",
@@ -633,7 +633,7 @@
       "ai_description": "The requested physical object is an electrical wall power outlet socket.",
       "aliases_en": ["wall plug", "power outlet"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-candle-lighter",
@@ -731,7 +731,7 @@
       "ai_description": "The requested physical object is an intact oval chicken egg (white or brown shell).",
       "aliases_en": ["egg"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-tomato",
@@ -745,7 +745,7 @@
       "ai_description": "The requested physical object is a fresh red round tomato.",
       "aliases_en": ["tomato"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-lemon",
@@ -759,7 +759,7 @@
       "ai_description": "The requested physical object is a yellow or green citrus lemon/lime.",
       "aliases_en": ["lemon", "lime"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-stapler",
@@ -787,7 +787,7 @@
       "ai_description": "The requested physical object is a bottle of spicy red hot sauce or chili sauce.",
       "aliases_en": ["chili sauce", "tabasco"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-cardboard-box",
@@ -801,7 +801,7 @@
       "ai_description": "The requested physical object is a corrugated cardboard storage or shipping box.",
       "aliases_en": ["packing box"],
       "safety": "general",
-      "availability": "frequent"
+      "availability": "common"
     },
     {
       "id": "obj-metal-coin",
