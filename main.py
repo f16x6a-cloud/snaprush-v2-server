@@ -1,4 +1,4 @@
-"""Snap Rush phone-camera service controlled by a Unity lobby.
+"""SNAP RUSH — Unity-controlled Camera Service.
 
 Run with: uvicorn main:app --host 0.0.0.0 --port 7860
 For production: replace volatile storage, use a single instance or shared state, add durable media.
@@ -34,11 +34,10 @@ MAX_FILE_BYTES = 5 * 1024 * 1024
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 POINTS = [100, 70, 40, 20, 0, 0]
 ROOM_TTL = 2 * 60 * 60
-# Local AI workers poll Render over HTTPS; Ollama stays on 127.0.0.1.
-# OPENAI mode is kept for backward compatibility until you explicitly select local.
+
 AI_PROVIDER = os.getenv("SNAPRUSH_AI_PROVIDER", "openai").strip().lower()
-AI_PENDING_TIMEOUT = 240  # seconds: fail safely so a broken/offline PC never traps a round
-AI_CLAIM_SECONDS = 180  # long enough for a single Ollama image request
+AI_PENDING_TIMEOUT = 240
+AI_CLAIM_SECONDS = 180
 
 
 def _ai_configured() -> bool:
@@ -51,57 +50,22 @@ def _ai_configured() -> bool:
         return bool(os.getenv("OPENAI_API_KEY"))
     return False
 
-# Object-only bilingual catalog. Color variants intentionally excluded.
-# Keep the CATALOG tuple format and target IDs unchanged for Unity compatibility.
+
 CATALOG_DATA = json.loads((ROOT / "data" / "objects.json").read_text(encoding="utf-8"))
 CATALOG_ITEMS = CATALOG_DATA["items"]
 CATALOG = [(c["id"], c["ar"], c["en"], c["ai_description"]) for c in CATALOG_ITEMS]
 CATALOG_INDEX = {item["id"]: i for i, item in enumerate(CATALOG_ITEMS)}
-assert len(CATALOG) == len(CATALOG_INDEX) == CATALOG_DATA["count"]
+assert len(CATALOG) == len(CATALOG_INDEX)
 assert all(item.get("kind") == "object" and not item.get("color") for item in CATALOG_ITEMS)
 
 
-# SNAP RUSH party mode: keep the complete 3,042-item catalog available, but
-# draw from a small, hand-picked pool of everyday objects in the default mode.
-# Matching by exact English label retains every existing Unity target_id.
-EASY_CHALLENGE_NAMES = (
-    "coffee mug", "drinking glass", "dinner plate", "tablespoon", "dinner fork",
-    "water bottle", "TV remote control", "air conditioner remote", "smartphone",
-    "phone charger", "ballpoint pen", "pencil", "notebook", "toothbrush",
-    "toothpaste tube", "bath towel", "hand soap bar", "tissue box", "socks",
-    "sneaker", "T-shirt", "baseball cap", "backpack", "wallet",
-    "sunglasses", "prescription glasses", "hair comb", "hairbrush",
-    "sleeping pillow", "throw blanket", "wall clock", "wall mirror",
-    "table lamp", "paper scissors", "apple", "banana", "orange", "lemon",
-    "potato", "tomato", "cucumber", "onion", "carrot", "egg carton",
-    "cereal box", "potato chips bag", "milk carton", "watermelon",
-    "school backpack", "hand towel", "door key", "car key",
-    "computer mouse", "computer keyboard", "television", "analog wristwatch",
-    "rice bag", "plastic cup", "tea box", "shoe rack", "soap dispenser",
-    "bookshelf",
-)
-_EASY_NAME_SET = set(EASY_CHALLENGE_NAMES)
-_EASY_CANDIDATES = [i for i, item in enumerate(CATALOG_ITEMS)
-                    if item["en"] in _EASY_NAME_SET
-                    and item.get("safety", "general") == "general"]
-assert len(_EASY_CANDIDATES) == len(EASY_CHALLENGE_NAMES), "Easy challenge catalog missing an item"
-
-
 def _new_challenge_order(rounds: int, mode: str = "mixed") -> list[int]:
-    """Select easy, recognizable targets in normal gameplay.
-
-    The 3,042-item catalog and all existing target IDs remain unchanged.
-    'mixed' (Unity's default) uses curated easy home items.
-    'all'/'objects' deliberately allow the full general-safety object catalog.
-    """
-    if mode == "mixed":
-        eligible_indices = _EASY_CANDIDATES
-    else:
-        eligible_indices = [i for i, item in enumerate(CATALOG_ITEMS)
-                            if item.get("safety", "general") == "general"]
-    if not 1 <= rounds <= len(eligible_indices):
-        raise ValueError("Round count exceeds the available object pool")
-    return random.SystemRandom().sample(eligible_indices, rounds)
+    """Draw randomly from the entire objects catalog without restriction."""
+    eligible_indices = list(range(len(CATALOG_ITEMS)))
+    if not eligible_indices:
+        return []
+    rounds_to_pick = min(max(1, rounds), len(eligible_indices))
+    return random.SystemRandom().sample(eligible_indices, rounds_to_pick)
 
 
 app = FastAPI(title="SNAP RUSH — Unity-controlled Camera Service", version="0.2.0")
@@ -109,7 +73,7 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 _lock = threading.RLock()
 _rooms: dict[str, "Room"] = {}
 _ai_worker_last_seen: float = 0.0
-# Telemetry only since this Render process started (not Cloudflare billing totals).
+
 _cloudflare_stats = {"completed": 0, "approved": 0, "rejected": 0,
                      "unverified": 0, "neurons": 0.0}
 
@@ -129,12 +93,12 @@ class Submission:
     slot: int
     round_no: int
     created_at: float
-    status: str = "analyzing"  # analyzing, correct, incorrect, unverified
+    status: str = "analyzing"
     reason: str = ""
     award: int = 0
     detected_object: str = ""
-    target_description: str = ""  # snapshotted at upload so changing rounds cannot change a job
-    ai_claim: str = ""  # per-claim random token prevents stale/duplicate worker results
+    target_description: str = ""
+    ai_claim: str = ""
     ai_leased_until: float = 0.0
     resolved_at: float = 0.0
     resolution_order: int = 0
@@ -195,7 +159,6 @@ class HostPlayerReady(BaseModel):
 
 
 class HostStartRound(BaseModel):
-    # Called only by the Unity lobby, never by a player's phone.
     host_key: str
     target_id: Optional[str] = None
     seconds: Optional[int] = Field(default=None, ge=15, le=120)
@@ -243,12 +206,10 @@ def _recompute_scores(room: Room) -> None:
             current = [sub for sub in room.submissions if sub.round_no == r]
             latest = {sub.slot: sub for sub in current}
             pending = any(sub.status == "analyzing" for sub in current)
-            # Finalize only after the round closes, or both submitted results are terminal.
             finalizable = not pending and (r in room.closed_rounds or
                 (r == room.current_round and room.state == "round_active" and
                  all(slot in latest for slot in (1, 2))))
             if correct and finalizable:
-                # 'correct' is sorted by SERVER submission timestamp, then stable ID.
                 winner = correct[0].slot
                 room.round_winners[r] = winner
                 correct[0].award = 100
@@ -268,14 +229,11 @@ def _recompute_scores(room: Room) -> None:
                 room.players[sub.slot].points += sub.award
 
 
-
 def _mark_round_ended(room: Room, now: float, reason: str) -> None:
     if room.state != "round_active":
         return
     room.state = "round_review"
     room.review_end = now + 5
-    # Every next round requires a NEW Ready press in Unity from each player.
-    # Previous round's Ready flags must never carry forward.
     for player in room.players.values():
         player.ready = False
     room.closed_rounds[room.current_round] = {
@@ -301,7 +259,6 @@ def _close_two_player_round_if_ready(room: Room, now: float) -> None:
 
 def _resolve_submission(room: Room, sub: Submission, status: str, reason: str,
                         detected_object: str = "") -> bool:
-    # Called under the existing room lock by every AI provider/timeout path.
     if sub.status != "analyzing":
         return False
     if status not in {"correct", "incorrect", "unverified"}:
@@ -349,12 +306,7 @@ def _round_result(room: Room, round_no: int) -> dict:
 
 
 def _advance(room: Room) -> None:
-    """Apply time-based state transitions, but NEVER start another round.
-
-    Unity is the only caller allowed to choose when a new round starts.
-    """
     now = time.time()
-    # Never keep the lobby waiting forever if a local worker is disconnected.
     if AI_PROVIDER == "local":
         for sub in room.submissions:
             if sub.status == "analyzing" and now - sub.created_at > AI_PENDING_TIMEOUT:
@@ -365,7 +317,6 @@ def _advance(room: Room) -> None:
     if room.state == "round_active" and now >= room.deadline:
         _mark_round_ended(room, now, "timer")
     _close_two_player_round_if_ready(room, now)
-    # Intentionally do not auto-progress to the next round: Unity owns it.
 
 
 def _qr_data(url: str) -> str:
@@ -376,8 +327,6 @@ def _qr_data(url: str) -> str:
 
 
 def _base_url() -> str:
-    # Prefer the exact public HTTPS hostname configured after deployment.
-    # An empty value falls back to browser location for QR URLs via JS.
     return APP_BASE_URL
 
 
@@ -405,7 +354,6 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
             "resolution_order": s.resolution_order,
         }
     current_result = _round_result(room, room.current_round) if room.current_round else None
-    # Clients may show an explicit Ready UI ONLY after the result reveal is complete.
     next_round_ready = (room.state == "round_review" and room.current_round < room.rounds
                         and time.time() >= room.review_end
                         and current_result is not None and current_result["finalized"])
@@ -451,8 +399,6 @@ def join_page():
 
 @app.get("/health")
 def health():
-    # Status counters reveal whether a worker is merely polling or actually
-    # processing photographs. No keys, photos or player data are returned.
     with _lock:
         now = time.time()
         pending = [sub for room in _rooms.values() for sub in room.submissions
@@ -524,12 +470,11 @@ def join_room(payload: JoinRequest):
 
 @app.post("/api/rooms/{room_id}/host/player-ready")
 def host_player_ready(room_id: str, payload: HostPlayerReady):
-    """Only Unity can mark a joined player as Ready from its lobby UI."""
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
         if room.state == "waiting":
-            pass  # Initial lobby Ready.
+            pass
         elif room.state == "round_review" and room.current_round < room.rounds:
             result = _round_result(room, room.current_round)
             if time.time() < room.review_end or not result["finalized"]:
@@ -545,10 +490,6 @@ def host_player_ready(room_id: str, payload: HostPlayerReady):
 
 @app.post("/api/rooms/{room_id}/host/start-round")
 def start_round(room_id: str, payload: HostStartRound):
-    """Unity lobby explicitly begins each round; the mobile site cannot.
-
-    If target_id is omitted, uses the server's shuffled object catalog.
-    """
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
@@ -560,9 +501,6 @@ def start_round(room_id: str, payload: HostStartRound):
             if len(room.players) != room.size or not all(p.ready for p in room.players.values()):
                 raise HTTPException(409, "Every connected player must be Ready before the first round")
         else:
-            # Even a Unity client that mistakenly auto-calls start-round cannot
-            # skip Ready: the server rejects it until every player explicitly
-            # confirms the NEXT round via the host/player-ready endpoint.
             last_result = _round_result(room, room.current_round)
             if not last_result["finalized"]:
                 raise HTTPException(409, "Wait for pending image analysis before continuing")
@@ -587,7 +525,6 @@ def start_round(room_id: str, payload: HostStartRound):
 
 @app.post("/api/rooms/{room_id}/host/finish")
 def finish_match(room_id: str, payload: HostRequest):
-    """Finish the match from Unity, never from the player website."""
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
@@ -608,7 +545,6 @@ def leave(payload: PlayerRequest):
             del room.players[p.slot]
             room.slot_tokens[p.slot] = secrets.token_urlsafe(24)
         else:
-            # Retain the claimed slot during a live match to avoid score/session impersonation.
             p.ready = False
         return {"ok": True}
 
@@ -646,8 +582,6 @@ def _decode_image(raw: bytes) -> bytes:
 
 
 def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_description: str):
-    # This function runs after HTTP upload succeeds so Unity sees the photo
-    # immediately as `analyzing`. Never block upload while calling the AI.
     result = verify_image(jpg, requested_description)
     with _lock:
         if AI_PROVIDER == "cloudflare":
@@ -675,9 +609,6 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
         player = _auth_player(room, session)
         if room.state != "round_active" or time.time() >= room.deadline:
             raise HTTPException(409, "There is no active photo challenge")
-        # One submission per player per round, regardless of AI verdict. This
-        # check occurs under _lock and stays enforced after reload/reconnect.
-        # No second upload can sneak through while the first is being analyzed.
         if any(s.round_no == room.current_round and s.slot == player.slot
                for s in room.submissions):
             raise HTTPException(409, "Only one photo is allowed per player per round")
@@ -690,8 +621,6 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
         if not _ai_configured():
             _resolve_submission(room, submission, "unverified", "AI verification not configured")
         elif AI_PROVIDER == "local":
-            # The local worker will claim this queued submission via authenticated HTTPS polling.
-            # Do NOT try connecting from Render to localhost or Ollama's port 11434.
             pass
         else:
             background_tasks.add_task(_analyze_photo, room.id, submission.id, jpg, target[3])
@@ -699,8 +628,6 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
                 "photo_url": f"/media/{room.id}/{submission.id}.jpg", "slot": player.slot}
 
 
-# Authenticated pull-queue for a desktop-based Ollama worker.
-# All requests are outgoing from the PC to Render; no inbound home network access.
 def _require_ai_worker(x_ai_worker_key: str) -> None:
     expected = os.getenv("SNAPRUSH_AI_WORKER_KEY", "")
     if AI_PROVIDER != "local":
@@ -723,7 +650,6 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
     with _lock:
         now = time.time()
         _ai_worker_last_seen = now
-        # Search by original receipt time, not claim time, to preserve fairness.
         queued = []
         for room in _rooms.values():
             if now - room.created_at > ROOM_TTL:
@@ -736,9 +662,6 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
         for _, room, sub in queued:
             image_path = MEDIA_DIR / f"{room.id}_{sub.id}.jpg"
             try:
-                # Keep the original 1024px server photo for Unity display.
-                # Send a smaller 640px variant only to local Ollama, to reduce
-                # vision tokens and processing time on the RTX 3060.
                 with Image.open(image_path) as img:
                     img = ImageOps.exif_transpose(img)
                     img.thumbnail((640, 640), Image.Resampling.LANCZOS)
@@ -781,7 +704,6 @@ def ai_submit_result(room_id: str, submission_id: str, result: AIWorkerResult,
 
 @app.get("/media/{room_id}/{submission_id}.jpg")
 def get_photo(room_id: str, submission_id: str):
-    # Unpredictable IDs for prototype; production requires room membership authorization.
     if not (len(room_id) == 8 and len(submission_id) == 32 and all(c in "0123456789ABCDEF" for c in room_id)
             and all(c in "0123456789abcdef" for c in submission_id)):
         raise HTTPException(404, "Photo not found")
@@ -816,16 +738,15 @@ def host_qr(room_id: str, payload: HostRequest, request: Request):
 @app.get("/api/catalog")
 def get_catalog(category: Optional[str] = None, difficulty: Optional[str] = None,
                 kind: Optional[str] = None, offset: int = 0, limit: int = 5000):
-    """Bilingual photo targets; only physical objects, never color variants."""
     if offset < 0 or not 1 <= limit <= 5000:
         raise HTTPException(422, "offset must be >=0 and limit must be 1..5000")
     filtered = [item for item in CATALOG_ITEMS if
-                (not category or item["category"] == category) and
-                (not difficulty or item["difficulty"] == difficulty) and
-                (not kind or item["kind"] == kind)]
+                (not category or item.get("category") == category) and
+                (not difficulty or item.get("difficulty") == difficulty) and
+                (not kind or item.get("kind") == kind)]
     result = []
     for item in filtered[offset:offset + limit]:
-        result.append({k: item[k] for k in ("id", "ar", "en", "category", "difficulty", "kind", "base_id")})
+        result.append({k: item.get(k) for k in ("id", "ar", "en", "category", "difficulty", "kind", "base_id")})
     return {"count": len(filtered), "items": result, "offset": offset, "limit": limit,
             "total_catalog": len(CATALOG_ITEMS)}
 
@@ -834,11 +755,13 @@ def get_catalog(category: Optional[str] = None, difficulty: Optional[str] = None
 def catalog_stats():
     categories = {}
     for item in CATALOG_ITEMS:
-        categories[item["category"]] = categories.get(item["category"], 0) + 1
-    return {"total_challenges": len(CATALOG_ITEMS),
-            "base_object_types": CATALOG_DATA["base_object_count"],
-            "color_variants": CATALOG_DATA["variant_count"],
-            "distinct_object_target": CATALOG_DATA["target_distinct_objects"],
-            "categories": categories,
-            "note": CATALOG_DATA["note"]}
-
+        cat = item.get("category", "general")
+        categories[cat] = categories.get(cat, 0) + 1
+    return {
+        "total_challenges": len(CATALOG_ITEMS),
+        "base_object_types": CATALOG_DATA.get("base_object_count", len(CATALOG_ITEMS)),
+        "color_variants": CATALOG_DATA.get("variant_count", 0),
+        "distinct_object_target": CATALOG_DATA.get("target_distinct_objects", len(CATALOG_ITEMS)),
+        "categories": categories,
+        "note": CATALOG_DATA.get("note", "")
+    }
