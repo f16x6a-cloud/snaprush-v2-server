@@ -1,7 +1,7 @@
-"""OpenAI fallback verifier for SNAP RUSH (used only when SNAPRUSH_AI_PROVIDER=openai).
+"""SNAP RUSH server-only photo verification.
 
-This module runs only on the FastAPI server, not on players' phones or in Unity.
-Never place OPENAI_API_KEY in Git or a client build.
+Cloudflare mode uses Gemma 4 (never Clef-Flash).
+Keep secrets in Render Environment; never in Unity or GitHub.
 """
 from __future__ import annotations
 
@@ -9,18 +9,25 @@ import base64
 from dataclasses import dataclass
 from io import BytesIO
 import json
-import re
+import logging
 import os
+import re
 import time
 from typing import Literal
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+logger = logging.getLogger(__name__)
+
+http_client = httpx.Client(
+    timeout=httpx.Timeout(30.0, connect=5.0),
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+)
+
 
 @dataclass(frozen=True)
 class ImageVerdict:
-    # Existing Unity statuses are deliberately preserved.
     status: Literal["correct", "incorrect", "unverified"]
     reason: str
     detected_object: str = ""
@@ -52,9 +59,16 @@ _SYSTEM_PROMPT = (
     "Return concise factual English descriptions and no personal information."
 )
 
+_CF_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 
-def verify_image(jpg: bytes, target_description: str, *, api_key: str | None = None,
-                 model: str | None = None) -> ImageVerdict:
+
+def verify_image(
+    jpg: bytes,
+    target_description: str,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> ImageVerdict:
     """Analyze JPG with a real multimodal API. Fail closed without false rejection.
 
     - `correct`: clearly visible requested object
@@ -68,78 +82,99 @@ def verify_image(jpg: bytes, target_description: str, *, api_key: str | None = N
     if not key:
         return ImageVerdict("unverified", "AI provider not configured")
     chosen_model = (model or os.getenv("OPENAI_VISION_MODEL") or "gpt-4o-mini").strip()
-    detail = os.getenv("SNAPRUSH_VISION_DETAIL", "high").strip().lower()
+    detail = os.getenv("SNAPRUSH_VISION_DETAIL", "low").strip().lower()
     if detail not in ("low", "high", "auto"):
-        detail = "high"
+        detail = "low"
 
     image_uri = "data:image/jpeg;base64," + base64.b64encode(jpg).decode("ascii")
     body = {
         "model": chosen_model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Requested item description from our server catalog: " + target_description},
-                {"type": "image_url", "image_url": {"url": image_uri, "detail": detail}},
-            ]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Requested item description from our server catalog: "
+                        + target_description,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image_uri, "detail": detail},
+                    },
+                ],
+            },
         ],
-        "response_format": {"type": "json_schema", "json_schema": {
-            "name": "snaprush_photo_check", "strict": True, "schema": _RESULT_SCHEMA,
-        }},
-        "max_completion_tokens": 180,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "snaprush_photo_check",
+                "strict": True,
+                "schema": _RESULT_SCHEMA,
+            },
+        },
+        "max_completion_tokens": 100,
     }
     try:
-        with httpx.Client(timeout=httpx.Timeout(30, connect=5)) as client:
-            response = None
-            for attempt in range(2):
-                response = client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
-                    json=body,
-                )
-                if response.status_code in {429, 502, 503, 504} and attempt == 0:
-                    time.sleep(0.6)
-                    continue
-                response.raise_for_status()
-                break
-            if response is None:
-                raise ValueError("Empty provider response")
-            message = response.json()["choices"][0]["message"]
-            if message.get("refusal"):
-                return ImageVerdict("unverified", "AI could not evaluate this photograph")
-            result = json.loads(message["content"])
-            verdict = result["verdict"]
-            if verdict not in ("approved", "rejected", "uncertain"):
-                raise ValueError("Unexpected verdict")
-            detected = str(result.get("detected_object") or "")[:90]
-            reason = str(result.get("reason") or "")[:160]
-            if verdict == "approved":
-                return ImageVerdict("correct", reason or "Requested object visible", detected)
-            if verdict == "rejected":
-                return ImageVerdict("incorrect", reason or "Requested object not visible", detected)
-            return ImageVerdict("unverified", reason or "The photo is too unclear to verify", detected)
-    except (httpx.HTTPError, KeyError, ValueError, TypeError, IndexError, json.JSONDecodeError):
-        # Avoid exposing model credentials or server details to clients.
-        return ImageVerdict("unverified", "AI service could not verify this photo; please retry")
-
-
-_CF_MODEL = "@cf/google/gemma-4-26b-a4b-it"
+        response = None
+        for attempt in range(2):
+            response = http_client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            if response.status_code in {429, 502, 503, 504} and attempt == 0:
+                time.sleep(0.5)
+                continue
+            response.raise_for_status()
+            break
+        if response is None:
+            raise ValueError("Empty provider response")
+        message = response.json()["choices"][0]["message"]
+        if message.get("refusal"):
+            return ImageVerdict("unverified", "AI could not evaluate this photograph")
+        result = json.loads(message["content"])
+        verdict = result["verdict"]
+        if verdict not in ("approved", "rejected", "uncertain"):
+            raise ValueError("Unexpected verdict")
+        detected = str(result.get("detected_object") or "")[:90]
+        reason = str(result.get("reason") or "")[:160]
+        if verdict == "approved":
+            return ImageVerdict(
+                "correct", reason or "Requested object visible", detected
+            )
+        if verdict == "rejected":
+            return ImageVerdict(
+                "incorrect", reason or "Requested object not visible", detected
+            )
+        return ImageVerdict(
+            "unverified", reason or "The photo is too unclear to verify", detected
+        )
+    except (
+        httpx.HTTPError,
+        KeyError,
+        ValueError,
+        TypeError,
+        IndexError,
+        json.JSONDecodeError,
+    ):
+        return ImageVerdict(
+            "unverified", "AI service could not verify this photo; please retry"
+        )
 
 
 def _cf_small_jpeg(jpg: bytes) -> bytes:
     """Reduce vision upload size; never change the original photo displayed by Unity."""
     with Image.open(BytesIO(jpg)) as image:
         image = ImageOps.exif_transpose(image)
-        image.thumbnail((640, 640), Image.Resampling.LANCZOS)
+        image.thumbnail((400, 400), Image.Resampling.LANCZOS)
         out = BytesIO()
-        image.convert("RGB").save(out, "JPEG", quality=72)
-        data = out.getvalue()
-        # Cloudflare accepts the base64 image inside JSON; aim well below limits.
-        if len(data) > 180_000:
-            image.thumbnail((480, 480), Image.Resampling.LANCZOS)
-            out = BytesIO()
-            image.convert("RGB").save(out, "JPEG", quality=58)
-            data = out.getvalue()
-        return data
+        image.convert("RGB").save(out, "JPEG", quality=65, optimize=True)
+        return out.getvalue()
 
 
 def _verify_cloudflare(jpg: bytes, target_description: str) -> ImageVerdict:
@@ -164,30 +199,67 @@ def _verify_cloudflare(jpg: bytes, target_description: str) -> ImageVerdict:
         payload = {
             "model": _CF_MODEL,
             "stream": False,
-            "max_completion_tokens": 256,
+            "max_completion_tokens": 8,
+            "temperature": 0,
             "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {
-                    "url": "data:image/jpeg;base64," + image64}},
-            ]}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/jpeg;base64," + image64
+                            },
+                        },
+                    ],
+                }
+            ],
         }
         url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions"
-        with httpx.Client(timeout=httpx.Timeout(35.0, connect=5.0)) as client:
-            resp = client.post(url, headers={"Authorization": "Bearer " + token}, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        resp = http_client.post(
+            url,
+            headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        if resp.status_code >= 400:
+            logger.warning("Gemma 4 Cloudflare HTTP status: %d", resp.status_code)
+        resp.raise_for_status()
+        data = resp.json()
+
         choices = data.get("choices") or []
-        message = choices[0].get("message") or {}
+        choice = choices[0]
+        message = choice.get("message") or {}
         output = str(message.get("content") or "").strip().upper().strip(" \t\n\r\"'`.")
         neurons = max(0.0, float((data.get("usage") or {}).get("neurons") or 0))
-        if choices[0].get("finish_reason") != "stop":
-            return ImageVerdict("unverified", "Cloudflare response was incomplete", neurons=neurons)
+
+        if choice.get("finish_reason") not in (None, "stop"):
+            return ImageVerdict(
+                "unverified", "Cloudflare response was incomplete", neurons=neurons
+            )
         if output == "APPROVED":
             return ImageVerdict("correct", "Requested item visible", neurons=neurons)
         if output == "REJECTED":
-            return ImageVerdict("incorrect", "Requested item not visible", neurons=neurons)
-        return ImageVerdict("unverified", "Could not confidently verify this image", neurons=neurons)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError,
-            UnidentifiedImageError, OSError, json.JSONDecodeError):
+            return ImageVerdict(
+                "incorrect", "Requested item not visible", neurons=neurons
+            )
+        return ImageVerdict(
+            "unverified",
+            "Could not confidently verify this image",
+            neurons=neurons,
+        )
+    except (
+        httpx.HTTPError,
+        ValueError,
+        KeyError,
+        TypeError,
+        IndexError,
+        UnidentifiedImageError,
+        OSError,
+        json.JSONDecodeError,
+    ):
         return ImageVerdict("unverified", "Cloudflare AI unavailable; please retry")
