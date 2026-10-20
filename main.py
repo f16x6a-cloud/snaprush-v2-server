@@ -176,6 +176,13 @@ class ClientReady(ClientRequest):
     ready: bool
 
 
+class SkipRequest(BaseModel):
+    slot: int = Field(ge=1, le=6)
+    round: int = Field(ge=1)
+    player_key: str = ""  # Unity credential; phones keep using their x-session header.
+    host_key: str = ""  # Shared Unity host display may explicitly forfeit any paired slot.
+
+
 class JoinRequest(BaseModel):
     room_id: str
     token: str
@@ -281,6 +288,12 @@ def _mark_round_ended(room: Room, now: float, reason: str) -> None:
     _recompute_scores(room)
 
 
+def _all_players_resolved(room: Room) -> bool:
+    latest = {sub.slot: sub for sub in room.submissions if sub.round_no == room.current_round}
+    return all(slot in latest and latest[slot].status in {"correct", "incorrect", "unverified", "skipped"}
+               for slot in range(1, room.size + 1))
+
+
 def _close_two_player_round_if_ready(room: Room, now: float) -> None:
     # Kept as an alias for integrations; now covers every configured slot.
     if room.state != "round_active":
@@ -288,10 +301,7 @@ def _close_two_player_round_if_ready(room: Room, now: float) -> None:
     if now >= room.deadline:
         _mark_round_ended(room, now, "timer")
         return
-    current = [sub for sub in room.submissions if sub.round_no == room.current_round]
-    latest = {sub.slot: sub for sub in current}
-    if (all(slot in latest for slot in range(1, room.size + 1)) and
-            all(sub.status != "analyzing" for sub in current)):
+    if _all_players_resolved(room):
         _mark_round_ended(room, now, "both_resolved" if room.size == 2 else "all_resolved")
 
 
@@ -325,14 +335,18 @@ def _round_result(room: Room, round_no: int) -> dict:
     rows = []
     for slot in range(1, room.size + 1):
         sub = latest.get(slot)
+        photo = sub is not None and sub.status != "skipped"
         rows.append({
-            "slot": slot, "submitted": sub is not None,
-            "submission_id": sub.id if sub else "",
-            "photo_url": f"/media/{room.id}/{sub.id}.jpg" if sub else "",
+            "slot": slot, "submitted": photo,
+            "submission_id": sub.id if photo else "",
+            "photo_url": f"/media/{room.id}/{sub.id}.jpg" if photo else "",
             "status": sub.status if sub else "missing",
             "reason": sub.reason if sub else "No photo submitted",
-            "submitted_at": sub.created_at if sub else 0,
-            "submitted_seconds": max(0, sub.created_at - start) if sub else 0,
+            "submitted_at": sub.created_at if photo else 0,
+            "submitted_seconds": max(0, sub.created_at - start) if photo else 0,
+            "skipped_at": sub.created_at if sub and sub.status == "skipped" else 0,
+            "approved": bool(sub and sub.status == "correct"),
+            "score": sum(s.award for s in current if s.slot == slot),
             "resolved_at": sub.resolved_at if sub else 0,
             "resolution_order": sub.resolution_order if sub else 0,
             "round_points": sum(s.award for s in current if s.slot == slot),
@@ -379,6 +393,8 @@ def _base_url() -> str:
 def _snapshot(room: Room, is_host: bool, current_session: str = "", desktop_slot: int = 0) -> dict:
     _advance(room)
     current = room.current_target()
+    current_subs = [s for s in room.submissions if s.round_no == room.current_round]
+    actions = {s.slot: s for s in current_subs}
     slots = []
     for i in range(1, room.size + 1):
         p = room.players.get(i)
@@ -386,13 +402,16 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "", desktop_slot
         entry = {"slot": i, "occupied": bool(p or member), "ready": p.ready if p else False, "points": p.points if p else 0,
                  "phone_connected": bool(p), "desktop_claimed": bool(member),
                  "desktop_connected": bool(member and time.time() - member.last_seen <= 10),
-                 "player_name": member.name if member else f"PLAYER {i}"}
+                 "player_name": member.name if member else f"PLAYER {i}",
+                 "round_status": actions[i].status if i in actions else "missing",
+                 "round_resolved": i in actions and actions[i].status in {"correct", "incorrect", "unverified", "skipped"}}
         if (is_host or desktop_slot == i) and not p and room.state == "waiting":
             entry["join_path"] = f"/join?room={room.id}&token={room.slot_tokens[i]}"
         slots.append(entry)
-    current_subs = [s for s in room.submissions if s.round_no == room.current_round]
     latest = {}
     for s in current_subs:
+        if s.status == "skipped":
+            continue  # A skip has no image file, media URL or AI job.
         latest[s.slot] = {
             "slot": s.slot, "photo_url": f"/media/{room.id}/{s.id}.jpg",
             "status": s.status, "reason": s.reason,
@@ -413,6 +432,8 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "", desktop_slot
         "connected": len(set(room.players) | set(room.members)), "ready_count": sum(p.ready for p in room.players.values()),
         "ready_phase": "next_round" if next_round_ready else ("lobby" if room.state == "waiting" else "none"),
         "can_ready_next_round": next_round_ready,
+        "skip_enabled": True,
+        "host_skip_enabled": True,
         "review_end": room.review_end,
         "rounds": room.rounds, "seconds": room.active_seconds,
         "round": room.current_round, "start_at": room.start_at,
@@ -467,7 +488,7 @@ def health():
                 **{k: v for k, v in _cloudflare_stats.items() if k != "neurons"},
                 "neurons": round(_cloudflare_stats["neurons"], 3),
             }
-        result["capabilities"] = ["multiplayer_lobby_v1"]
+        result["capabilities"] = ["multiplayer_lobby_v1", "skip_round_v1", "host_skip_v1"]
         return result
 
 
@@ -763,6 +784,46 @@ def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_descr
             sub = next((v for v in room.submissions if v.id == submission_id), None)
             if sub and sub.status == "analyzing":
                 _resolve_submission(room, sub, result.status, result.reason, result.detected_object)
+
+
+@app.post("/api/rooms/{room_id}/skip")
+def skip_round(room_id: str, payload: SkipRequest, x_session: str = Header(default=""),
+               x_player_key: str = Header(default=""), x_host_key: str = Header(default="")):
+    with _lock:
+        room = _get_room(room_id)
+        key = payload.player_key or x_player_key
+        host_key = payload.host_key or x_host_key
+        if payload.player_key and x_player_key and not secrets.compare_digest(payload.player_key, x_player_key):
+            raise HTTPException(401, "Conflicting player credentials")
+        if payload.host_key and x_host_key and not secrets.compare_digest(payload.host_key, x_host_key):
+            raise HTTPException(401, "Conflicting host credentials")
+        if sum(bool(k) for k in (key, host_key, x_session)) != 1:
+            raise HTTPException(401, "Provide exactly one host key, Unity player key or phone session")
+        if host_key:
+            _auth_host(room, host_key)
+        member = _auth_client(room, key) if key else None
+        player = room.players.get(payload.slot if host_key else member.slot) if host_key or member else _auth_player(room, x_session)
+        if player is None:
+            raise HTTPException(409, "Pair this player's phone before skipping")
+        if not host_key and payload.slot != player.slot:
+            raise HTTPException(403, "A player can only skip their own slot")
+        if payload.round != room.current_round:
+            raise HTTPException(409, "Skip request is for a different round")
+        existing = next((s for s in room.submissions if s.round_no == room.current_round and s.slot == player.slot), None)
+        if not existing or existing.status != "skipped":
+            if room.state != "round_active" or time.time() >= room.deadline:
+                raise HTTPException(409, "There is no active round to skip")
+            if existing:
+                raise HTTPException(409, "A photo is already submitted; this round cannot be skipped")
+            now = time.time()
+            room.result_sequence += 1
+            room.submissions.append(Submission(id=secrets.token_hex(16), slot=player.slot,
+                round_no=room.current_round, created_at=now, status="skipped", reason="Player skipped this round",
+                resolved_at=now, resolution_order=room.result_sequence))
+            _recompute_scores(room)
+            _close_two_player_round_if_ready(room, now)
+        # Retrying an acknowledged skip is safe, including after it closed the round.
+        return _snapshot(room, bool(host_key), current_session=x_session, desktop_slot=member.slot if member else 0)
 
 
 @app.post("/api/rooms/{room_id}/photos")
