@@ -88,6 +88,15 @@ class Player:
 
 
 @dataclass
+class DesktopMember:
+    slot: int
+    key: str
+    name: str
+    request_id: str = ""
+    last_seen: float = field(default_factory=time.time)
+
+
+@dataclass
 class Submission:
     id: str
     slot: int
@@ -127,6 +136,11 @@ class Room:
     result_sequence: int = 0
     round_winners: dict[int, int] = field(default_factory=dict)
     closed_rounds: dict[int, dict] = field(default_factory=dict)
+    room_code: str = ""
+    scoring_mode: str = "WinnerTakesAll"
+    multiplayer: bool = False
+    creation_request: str = ""
+    members: dict[int, DesktopMember] = field(default_factory=dict)
 
     def current_target(self) -> Optional[tuple[str, str, str, str]]:
         if not self.current_round:
@@ -139,6 +153,27 @@ class RoomCreate(BaseModel):
     rounds: int = Field(default=5, ge=1, le=15)
     seconds: int = Field(default=60, ge=15, le=120)
     catalog_mode: Literal["mixed", "objects", "all"] = "mixed"
+    player_capacity: Optional[int] = Field(default=None, ge=2, le=4)
+    scoring_mode: Optional[Literal["WinnerTakesAll", "RankedTiered"]] = None
+    round_count: Optional[int] = Field(default=None, ge=1, le=15)
+    duration: Optional[int] = Field(default=None, ge=15, le=120)
+    unity_host: bool = False
+    player_name: str = Field(default="", max_length=24)
+    request_id: str = Field(default="", max_length=64)
+
+
+class ClientJoin(BaseModel):
+    room_code: str = Field(pattern=r"^[0-9]{6}$")
+    player_name: str = Field(default="", max_length=24)
+    request_id: str = Field(min_length=16, max_length=64)
+
+
+class ClientRequest(BaseModel):
+    player_key: str
+
+
+class ClientReady(ClientRequest):
+    ready: bool
 
 
 class JoinRequest(BaseModel):
@@ -173,6 +208,8 @@ def _get_room(room_id: str) -> Room:
     room = _rooms.get(room_id)
     if room is None:
         raise HTTPException(404, "Room not found or expired")
+    if room.state == "closed":
+        raise HTTPException(410, "The host closed this room; create or join another room")
     if time.time() - room.created_at > ROOM_TTL:
         del _rooms[room_id]
         raise HTTPException(410, "Room expired; create a new room")
@@ -192,39 +229,39 @@ def _auth_host(room: Room, key: str) -> None:
         raise HTTPException(401, "Invalid host key")
 
 
+def _auth_client(room: Room, key: str) -> DesktopMember:
+    for member in room.members.values():
+        if key and secrets.compare_digest(member.key, key):
+            member.last_seen = time.time()
+            return member
+    raise HTTPException(401, "Invalid Unity player session")
+
+
 def _recompute_scores(room: Room) -> None:
     for p in room.players.values():
         p.points = 0
-    for s in room.submissions:
-        s.award = 0
+    for sub in room.submissions:
+        sub.award = 0
     for r in range(1, room.current_round + 1):
-        correct = sorted(
-            (s for s in room.submissions if s.round_no == r and s.status == "correct"),
-            key=lambda s: (s.created_at, s.id),
-        )
-        if room.size == 2:
-            current = [sub for sub in room.submissions if sub.round_no == r]
-            latest = {sub.slot: sub for sub in current}
-            pending = any(sub.status == "analyzing" for sub in current)
-            finalizable = not pending and (r in room.closed_rounds or
-                (r == room.current_round and room.state == "round_active" and
-                 all(slot in latest for slot in (1, 2))))
-            if correct and finalizable:
-                winner = correct[0].slot
-                room.round_winners[r] = winner
-                correct[0].award = 100
-                if winner in room.players:
-                    room.players[winner].points += 100
-            else:
-                room.round_winners.pop(r, None)
+        current = [sub for sub in room.submissions if sub.round_no == r]
+        pending = any(sub.status == "analyzing" for sub in current)
+        latest = {sub.slot: sub for sub in current}
+        finalizable = not pending and (r in room.closed_rounds or
+            (r == room.current_round and room.state == "round_active" and
+             all(slot in latest for slot in range(1, room.size + 1))))
+        if not finalizable:
+            room.round_winners.pop(r, None)
             continue
+        correct = sorted((sub for sub in current if sub.status == "correct"),
+                         key=lambda sub: (sub.created_at, sub.id))
+        room.round_winners[r] = correct[0].slot if correct else 0
         rewarded: set[int] = set()
         for sub in correct:
             if sub.slot in rewarded:
                 continue
-            position = len(rewarded)
+            rank = len(rewarded)
             rewarded.add(sub.slot)
-            sub.award = POINTS[position]
+            sub.award = (100 if rank == 0 else 0) if room.scoring_mode == "WinnerTakesAll" else POINTS[rank]
             if sub.slot in room.players:
                 room.players[sub.slot].points += sub.award
 
@@ -245,16 +282,17 @@ def _mark_round_ended(room: Room, now: float, reason: str) -> None:
 
 
 def _close_two_player_round_if_ready(room: Room, now: float) -> None:
-    if room.size != 2 or room.state != "round_active":
+    # Kept as an alias for integrations; now covers every configured slot.
+    if room.state != "round_active":
         return
     if now >= room.deadline:
         _mark_round_ended(room, now, "timer")
         return
     current = [sub for sub in room.submissions if sub.round_no == room.current_round]
     latest = {sub.slot: sub for sub in current}
-    if (all(slot in latest for slot in (1, 2)) and
+    if (all(slot in latest for slot in range(1, room.size + 1)) and
             all(sub.status != "analyzing" for sub in current)):
-        _mark_round_ended(room, now, "both_resolved")
+        _mark_round_ended(room, now, "both_resolved" if room.size == 2 else "all_resolved")
 
 
 def _resolve_submission(room: Room, sub: Submission, status: str, reason: str,
@@ -269,6 +307,9 @@ def _resolve_submission(room: Room, sub: Submission, status: str, reason: str,
     sub.ai_claim, sub.ai_leased_until = "", 0.0
     _recompute_scores(room)
     _close_two_player_round_if_ready(room, sub.resolved_at)
+    if room.state == "round_review" and not any(
+            s.status == "analyzing" for s in room.submissions if s.round_no == room.current_round):
+        room.review_end = max(room.review_end, sub.resolved_at + 5)
     return True
 
 
@@ -279,6 +320,8 @@ def _round_result(room: Room, round_no: int) -> dict:
     start = closed.get("start_at", room.start_at if round_no == room.current_round else 0)
     winner = room.round_winners.get(round_no, 0)
     finalized = bool(closed) and not any(sub.status == "analyzing" for sub in current)
+    approved = sorted((s for s in current if s.status == "correct"), key=lambda s: (s.created_at, s.id))
+    ranks = {s.slot: i + 1 for i, s in enumerate(approved)} if finalized else {}
     rows = []
     for slot in range(1, room.size + 1):
         sub = latest.get(slot)
@@ -292,11 +335,11 @@ def _round_result(room: Room, round_no: int) -> dict:
             "submitted_seconds": max(0, sub.created_at - start) if sub else 0,
             "resolved_at": sub.resolved_at if sub else 0,
             "resolution_order": sub.resolution_order if sub else 0,
-            "round_points": (100 if slot == winner else 0) if room.size == 2
-                            else sum(s.award for s in current if s.slot == slot),
+            "round_points": sum(s.award for s in current if s.slot == slot),
+            "rank": ranks.get(slot, 0),
         })
     return {
-        "round": round_no, "winner_slot": winner, "finalized": finalized,
+        "round": round_no, "winner_slot": winner, "finalized": finalized, "scoring_mode": room.scoring_mode,
         "ended_at": closed.get("ended_at", 0),
         "end_reason": closed.get("end_reason", ""),
         "results_ready_at": max([closed.get("ended_at", 0)] +
@@ -307,10 +350,13 @@ def _round_result(room: Room, round_no: int) -> dict:
 
 def _advance(room: Room) -> None:
     now = time.time()
-    if AI_PROVIDER == "local":
-        for sub in room.submissions:
-            if sub.status == "analyzing" and now - sub.created_at > AI_PENDING_TIMEOUT:
-                _resolve_submission(room, sub, "unverified", "AI analysis timed out; please retry")
+    for sub in room.submissions:
+        if sub.status == "analyzing" and now - sub.created_at > AI_PENDING_TIMEOUT:
+            _resolve_submission(room, sub, "unverified", "AI analysis timed out; please retry")
+    if room.state in {"waiting", "round_review"}:
+        for slot, member in room.members.items():
+            if now - member.last_seen > 10 and slot in room.players:
+                room.players[slot].ready = False
     if room.state == "countdown" and now >= room.start_at:
         room.state = "round_active"
         room.deadline = room.start_at + room.active_seconds
@@ -330,14 +376,18 @@ def _base_url() -> str:
     return APP_BASE_URL
 
 
-def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
+def _snapshot(room: Room, is_host: bool, current_session: str = "", desktop_slot: int = 0) -> dict:
     _advance(room)
     current = room.current_target()
     slots = []
     for i in range(1, room.size + 1):
         p = room.players.get(i)
-        entry = {"slot": i, "occupied": bool(p), "ready": p.ready if p else False, "points": p.points if p else 0}
-        if is_host and not p and room.state == "waiting":
+        member = room.members.get(i)
+        entry = {"slot": i, "occupied": bool(p or member), "ready": p.ready if p else False, "points": p.points if p else 0,
+                 "phone_connected": bool(p), "desktop_claimed": bool(member),
+                 "desktop_connected": bool(member and time.time() - member.last_seen <= 10),
+                 "player_name": member.name if member else f"PLAYER {i}"}
+        if (is_host or desktop_slot == i) and not p and room.state == "waiting":
             entry["join_path"] = f"/join?room={room.id}&token={room.slot_tokens[i]}"
         slots.append(entry)
     current_subs = [s for s in room.submissions if s.round_no == room.current_round]
@@ -358,27 +408,31 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "") -> dict:
                         and time.time() >= room.review_end
                         and current_result is not None and current_result["finalized"])
     result = {
-        "room_id": room.id, "state": room.state, "capacity": room.size,
-        "connected": len(room.players), "ready_count": sum(p.ready for p in room.players.values()),
+        "room_id": room.id, "room_code": room.room_code, "state": room.state, "capacity": room.size,
+        "scoring_mode": room.scoring_mode,
+        "connected": len(set(room.players) | set(room.members)), "ready_count": sum(p.ready for p in room.players.values()),
         "ready_phase": "next_round" if next_round_ready else ("lobby" if room.state == "waiting" else "none"),
         "can_ready_next_round": next_round_ready,
         "review_end": room.review_end,
         "rounds": room.rounds, "seconds": room.active_seconds,
         "round": room.current_round, "start_at": room.start_at,
         "deadline": room.deadline, "server_now": time.time(),
-        "target": {"id": current[0], "ar": current[1], "en": current[2]} if current and room.state in ("round_active", "round_review", "finished") else None,
+        "target": {"id": current[0], "ar": current[1], "en": current[2],
+                   "category": CATALOG_ITEMS[CATALOG_INDEX[current[0]]].get("category", "")} if current and room.state in ("round_active", "round_review", "finished") else None,
         "slots": slots, "photos": list(latest.values()),
         "ai_enabled": _ai_configured(),
         "ai_provider": AI_PROVIDER,
         "ai_worker_online": AI_PROVIDER == "local" and (time.time() - _ai_worker_last_seen < 30),
         "control": "unity", "catalog_size": len(CATALOG),
-        "gameplay_rules": "two_player_submission_order_v1" if room.size == 2 else "legacy_multiplayer",
+        "gameplay_rules": "multiplayer_submission_order_v2" if room.multiplayer else ("two_player_submission_order_v1" if room.size == 2 else "legacy_multiplayer"),
         "round_result": current_result,
         "round_results": [_round_result(room, r) for r in sorted(room.closed_rounds)],
     }
     if is_host:
         result["general_join_path"] = f"/join?room={room.id}&token={room.auto_token}"
         result["max_rounds"] = room.rounds
+    elif desktop_slot:
+        result["my_slot"] = desktop_slot
     else:
         p = _auth_player(room, current_session)
         result["my_slot"] = p.slot
@@ -413,35 +467,144 @@ def health():
                 **{k: v for k, v in _cloudflare_stats.items() if k != "neurons"},
                 "neurons": round(_cloudflare_stats["neurons"], 3),
             }
+        result["capabilities"] = ["multiplayer_lobby_v1"]
         return result
+
+
+def _client_response(room: Room, member: DesktopMember, host: bool = False) -> dict:
+    result = {"room_id": room.id, "room_code": room.room_code, "slot": member.slot, "player_key": member.key}
+    if host:
+        result["host_key"] = room.host_key
+    return result
 
 
 @app.post("/api/rooms")
 def create_room(payload: RoomCreate):
     with _lock:
+        if payload.request_id:
+            for existing in _rooms.values():
+                if existing.creation_request == payload.request_id and time.time() - existing.created_at <= ROOM_TTL:
+                    if existing.state == "closed" or 1 not in existing.members:
+                        raise HTTPException(409, "This creation request belongs to a closed room; start a new session")
+                    return _client_response(existing, existing.members[1], True)
+        size = payload.player_capacity or payload.players
+        rounds = payload.round_count or payload.rounds
+        seconds = payload.duration or payload.seconds
+        if payload.unity_host and (payload.player_capacity is None or payload.scoring_mode is None):
+            raise HTTPException(422, "Unity rooms require player_capacity and scoring_mode")
         room_id = secrets.token_hex(4).upper()
         while room_id in _rooms:
             room_id = secrets.token_hex(4).upper()
-        order = _new_challenge_order(payload.rounds, payload.catalog_mode)
-        room = Room(
-            id=room_id, host_key=secrets.token_urlsafe(32),
-            size=payload.players, rounds=payload.rounds, seconds=payload.seconds,
-            active_seconds=payload.seconds,
-            challenge_order=order,
-            catalog_mode=payload.catalog_mode,
-            slot_tokens={i: secrets.token_urlsafe(24) for i in range(1, payload.players + 1)},
-        )
+        active_codes = {r.room_code for r in _rooms.values() if time.time() - r.created_at <= ROOM_TTL}
+        code = f"{secrets.randbelow(1000000):06d}"
+        while code in active_codes:
+            code = f"{secrets.randbelow(1000000):06d}"
+        room = Room(id=room_id, host_key=secrets.token_urlsafe(32), size=size, rounds=rounds, seconds=seconds,
+                    active_seconds=seconds, challenge_order=_new_challenge_order(rounds, payload.catalog_mode),
+                    catalog_mode=payload.catalog_mode, slot_tokens={i: secrets.token_urlsafe(24) for i in range(1, size + 1)},
+                    room_code=code, scoring_mode=payload.scoring_mode or ("WinnerTakesAll" if size == 2 else "RankedTiered"),
+                    multiplayer=payload.player_capacity is not None, creation_request=payload.request_id if payload.unity_host else "")
         _rooms[room_id] = room
-        return {"room_id": room.id, "host_key": room.host_key}
+        if payload.unity_host:
+            member = DesktopMember(1, secrets.token_urlsafe(32), payload.player_name.strip() or "PLAYER 1", payload.request_id)
+            room.members[1] = member
+            return _client_response(room, member, True)
+        return {"room_id": room.id, "host_key": room.host_key, "room_code": code}
+
+
+@app.post("/api/rooms/join-client")
+def join_client(payload: ClientJoin):
+    with _lock:
+        room = next((r for r in _rooms.values() if r.room_code == payload.room_code and time.time() - r.created_at <= ROOM_TTL), None)
+        if room is None:
+            raise HTTPException(404, "Room code not found or expired")
+        for member in room.members.values():
+            if member.request_id == payload.request_id:
+                member.last_seen = time.time()
+                return _client_response(room, member)
+        if not room.multiplayer or room.state != "waiting":
+            raise HTTPException(409, "Unity players can only join an open multiplayer lobby")
+        slot = next((i for i in range(1, room.size + 1) if i not in room.members), None)
+        if slot is None:
+            raise HTTPException(409, "All Unity player slots are claimed")
+        member = DesktopMember(slot, secrets.token_urlsafe(32), payload.player_name.strip() or f"PLAYER {slot}", payload.request_id)
+        room.members[slot] = member
+        if slot in room.players:
+            room.players[slot].ready = False
+        return _client_response(room, member)
 
 
 @app.get("/api/rooms/{room_id}/state")
-def room_state(room_id: str, x_session: str = Header(default=""), x_host_key: str = Header(default="")):
+def room_state(room_id: str, x_session: str = Header(default=""), x_host_key: str = Header(default=""),
+               x_player_key: str = Header(default="")):
+    with _lock:
+        # Authenticate and refresh the caller's heartbeat before advancing readiness.
+        room = _rooms.get(room_id)
+        if room is None:
+            raise HTTPException(404, "Room not found or expired")
+        is_host = bool(x_host_key and secrets.compare_digest(room.host_key, x_host_key))
+        member = None
+        if is_host and 1 in room.members:
+            room.members[1].last_seen = time.time()
+        elif x_player_key:
+            member = _auth_client(room, x_player_key)
+        room = _get_room(room_id)
+        return _snapshot(room, is_host, x_session, member.slot if member else 0)
+
+
+def _validate_ready_phase(room: Room):
+    if room.state == "waiting":
+        return
+    if room.state == "round_review" and room.current_round < room.rounds:
+        if time.time() >= room.review_end and _round_result(room, room.current_round)["finalized"]:
+            return
+    raise HTTPException(409, "Ready is only available in the lobby or after a non-final round review")
+
+
+@app.post("/api/rooms/{room_id}/player-ready")
+def client_ready(room_id: str, payload: ClientReady):
     with _lock:
         room = _get_room(room_id)
-        if x_host_key and secrets.compare_digest(room.host_key, x_host_key):
-            return _snapshot(room, True)
-        return _snapshot(room, False, x_session)
+        member = _auth_client(room, payload.player_key)
+        _validate_ready_phase(room)
+        player = room.players.get(member.slot)
+        if player is None:
+            raise HTTPException(409, "Pair this player's phone before Ready")
+        player.ready = payload.ready
+        return _snapshot(room, False, desktop_slot=member.slot)
+
+
+@app.post("/api/rooms/{room_id}/client-qr")
+def client_qr(room_id: str, payload: ClientRequest, request: Request):
+    with _lock:
+        room = _get_room(room_id)
+        member = _auth_client(room, payload.player_key)
+        images = {}
+        if member.slot not in room.players and room.state == "waiting":
+            path = f"/join?room={room.id}&token={room.slot_tokens[member.slot]}"
+            host = _base_url() or str(request.base_url).rstrip("/")
+            images[str(member.slot)] = {"path": path, "image": _qr_data(host + path)}
+        return {"qr": images}
+
+
+@app.post("/api/rooms/{room_id}/client-leave")
+def client_leave(room_id: str, payload: ClientRequest):
+    with _lock:
+        room = _get_room(room_id)
+        member = _auth_client(room, payload.player_key)
+        del room.members[member.slot]
+        if member.slot == 1:
+            room.state = "closed"
+            for p in room.players.values():
+                p.ready = False
+            return {"ok": True, "closed": True}
+        player = room.players.get(member.slot)
+        if player:
+            player.ready = False
+        if room.state == "waiting":
+            room.players.pop(member.slot, None)
+            room.slot_tokens[member.slot] = secrets.token_urlsafe(24)
+        return {"ok": True}
 
 
 @app.post("/api/join")
@@ -473,6 +636,8 @@ def host_player_ready(room_id: str, payload: HostPlayerReady):
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
+        if room.multiplayer and payload.slot in room.members and payload.slot != 1:
+            raise HTTPException(403, "A Unity player controls their own Ready state")
         if room.state == "waiting":
             pass
         elif room.state == "round_review" and room.current_round < room.rounds:
@@ -528,9 +693,9 @@ def finish_match(room_id: str, payload: HostRequest):
     with _lock:
         room = _get_room(room_id)
         _auth_host(room, payload.host_key)
-        if room.size == 2 and room.state != "finished" and not (
+        if room.state != "finished" and not (
                 room.current_round == room.rounds and room.state == "round_review" and
-                _round_result(room, room.current_round)["finalized"]):
+                _round_result(room, room.current_round)["finalized"] and time.time() >= room.review_end):
             raise HTTPException(409, "Wait for the final round and all AI results")
         room.state = "finished"
         return _snapshot(room, True)
@@ -558,7 +723,11 @@ def reset_room(room_id: str, payload: HostRequest):
         room.current_round = 0
         room.start_at = room.deadline = room.review_end = 0
         room.active_seconds = room.seconds
-        room.players.clear()
+        if room.multiplayer:
+            for p in room.players.values():
+                p.ready, p.points = False, 0
+        else:
+            room.players.clear()
         room.submissions.clear()
         room.result_sequence = 0
         room.round_winners.clear()
@@ -652,7 +821,7 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
         _ai_worker_last_seen = now
         queued = []
         for room in _rooms.values():
-            if now - room.created_at > ROOM_TTL:
+            if room.state == "closed" or now - room.created_at > ROOM_TTL:
                 continue
             _advance(room)
             for sub in room.submissions:
