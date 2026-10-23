@@ -190,10 +190,21 @@ function snap() {
   const video=$('#video');
   if (!video.videoWidth) {notice('الكاميرا لم تجهز بعد');return;}
   const ratio=Math.min(1,1280/Math.max(video.videoWidth,video.videoHeight));
-  const canvas=document.createElement('canvas');canvas.width=Math.round(video.videoWidth*ratio);canvas.height=Math.round(video.videoHeight*ratio);
+  const canvas=document.createElement('canvas');
+  canvas.width=Math.round(video.videoWidth*ratio);
+  canvas.height=Math.round(video.videoHeight*ratio);
   captureInProgress=true;
   updateCaptureControls();
-  canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+  const ctx=canvas.getContext('2d');
+  
+  // إذا كانت الكاميرا الأمامية مفعّلة، يتم قلب الصورة أفقياً لكي لا تظهر معكوسة في اللعبة
+  const isFront = facing === 'user' || stream?.getVideoTracks?.()[0]?.getSettings?.()?.facingMode === 'user';
+  if (isFront) {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
+  
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
   canvas.toBlob(blob=>{
     if (!blob) {notice('تعذر إنشاء الصورة');captureInProgress=false;updateCaptureControls();return;}
     uploadBlob(blob).finally(()=>{captureInProgress=false;updateCaptureControls();});
