@@ -1113,7 +1113,7 @@
     },
     {
       "id": "body-peace-sign",
-      "ar": "علامة النصر باليد (✌️)",
+      "ar": "علامة النصر باليد",
       "en": "peace sign hand gesture",
       "category": "body_parts",
       "difficulty": "easy",
@@ -1127,7 +1127,7 @@
     },
     {
       "id": "body-biceps-flex",
-      "ar": "عضلة الذراع (استعراض البايسبس 💪)",
+      "ar": "عضلة الذراع (استعراض البايسبس)",
       "en": "biceps flex pose",
       "category": "body_parts",
       "difficulty": "easy",
@@ -1155,7 +1155,7 @@
     },
     {
       "id": "body-thumbs-up",
-      "ar": "إبهام مرفوع (علامة لايك 👍)",
+      "ar": "(إبهام مرفوع (علامة لايك",
       "en": "thumbs up hand gesture",
       "category": "body_parts",
       "difficulty": "easy",
@@ -1267,7 +1267,7 @@
     },
     {
       "id": "body-touch-nose",
-      "ar": "لمس الأنف بالسبابة (👉👃)",
+      "ar": "لمس الأنف بالسبابة",
       "en": "index finger touching tip of nose",
       "category": "body_parts",
       "difficulty": "easy",
@@ -1281,7 +1281,7 @@
     },
     {
       "id": "body-winking-eye",
-      "ar": "غمزة بالعين (😉)",
+      "ar": "غمزة بالعين",
       "en": "winking eye facial expression",
       "category": "body_parts",
       "difficulty": "easy",
@@ -1477,7 +1477,7 @@
     },
     {
       "id": "body-sticking-tongue-out",
-      "ar": "إخراج اللسان (😛)",
+      "ar": "إخراج اللسان",
       "en": "sticking tongue out face gesture",
       "category": "body_parts",
       "difficulty": "easy",
