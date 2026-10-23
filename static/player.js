@@ -1,5 +1,5 @@
 'use strict';
-// The phone ONLY captures and uploads photos. Unity owns Ready, rounds and timers.
+// The phone captures photos or forfeits its own round. Unity owns Ready/start/timers.
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
 const roomId = params.get('room');
@@ -8,7 +8,7 @@ const localKey = 'snaprush_camera_session_' + (roomId || 'unknown');
 let current = null;
 try { current = JSON.parse(localStorage.getItem(localKey) || 'null'); } catch { localStorage.removeItem(localKey); }
 let state = null, stream = null, facing = 'environment', uploading = false, polling = false;
-let captureInProgress = false, submittedRound = 0;
+let captureInProgress = false, submittedRound = 0, skippedRound = 0, skipping = false, connected = false;
 // Anchor to the authoritative server epoch using monotonic time on this device.
 let clockServerAtSync = 0, clockMonotonicAtSync = 0;
 function estimatedServerTime() {
@@ -23,13 +23,23 @@ function alreadySubmitted() {
   if (!current || currentRound < 1) return false;
   return submittedRound === currentRound || !!state?.photos?.some(p => p.slot === current.slot);
 }
+function alreadySkipped() {
+  const round = Number(state?.round) || 0;
+  return !!current && round > 0 && (skippedRound === round ||
+    state?.slots?.some(p => p.slot === current.slot && p.round_status === 'skipped'));
+}
 function canSubmitPhoto() {
-  return !!current && !!state && state.state === 'round_active' && secondsRemaining() > 0 &&
-    !alreadySubmitted() && !uploading && !captureInProgress;
+  return connected && !!current && !!state && state.state === 'round_active' && secondsRemaining() > 0 &&
+    !alreadySubmitted() && !alreadySkipped() && !skipping && !uploading && !captureInProgress;
+}
+function canSkipRound() {
+  return !!state?.skip_enabled && canSubmitPhoto();
 }
 function updateCaptureControls() {
   $('#snap').disabled = !canSubmitPhoto() || !stream;
   $('#useSystemCamera').disabled = !canSubmitPhoto();
+  $('#skipRound').hidden = !state?.skip_enabled || state.state !== 'round_active';
+  $('#skipRound').disabled = !canSkipRound();
 }
 function displayRoundClock() {
   const meta = $('#roundMeta'), face = $('#roundTimer'), bar = $('#roundProgress');
@@ -69,11 +79,13 @@ async function api(path, options={}) {
   return data;
 }
 function setConnected(ok) {
+  connected = !!ok;
   const chip = $('#connection'); chip.classList.toggle('online', !!ok);
   chip.lastChild.textContent = ok ? ' متصل باللعبة' : ' غير متصل';
   $('#openCamera').disabled = !ok;
   $('#useSystemCamera').disabled = !ok || !canSubmitPhoto();
   $('#leave').disabled = !ok;
+  updateCaptureControls();
 }
 async function connect() {
   if (!roomId) {
@@ -101,9 +113,15 @@ async function connect() {
   } catch (e) { setConnected(false); $('#playerNumber').textContent='TRY AGAIN'; $('#statusLine').textContent=e.message; notice(e.message); }
 }
 function render(s, rttMs=0) {
+  // A slow poll must not undo a newer skip acknowledgment or round transition.
+  if (state?.room_id === s.room_id && Number(s.server_now) < Number(state.server_now)) return;
+  const fresh = s !== state;
+  if (fresh && (!s.round || Number(s.start_at) !== Number(state?.start_at))) submittedRound = skippedRound = 0;
   state = s;
-  clockServerAtSync = Number(s.server_now) + Math.max(0,rttMs)/2000;
-  clockMonotonicAtSync = performance.now();
+  if (fresh) {
+    clockServerAtSync = Number(s.server_now) + Math.max(0,rttMs)/2000;
+    clockMonotonicAtSync = performance.now();
+  }
   displayRoundClock();
   const active = s.state === 'round_active';
   const messages = {
@@ -113,12 +131,19 @@ function render(s, rttMs=0) {
     round_review: s.can_ready_next_round ? 'بانتظار جاهزية اللاعبين في Unity لبدء الجولة التالية.' : 'انتهت الجولة. جاري عرض النتائج...',
     finished:'🏆 انتهت المباراة. تقدر تغلق الكاميرا.'
   };
-  $('#statusLine').textContent=alreadySubmitted() && active ? '📸 تم إرسال صورتك. صورة واحدة فقط لكل جولة.' : (messages[s.state] || 'متصل باللعبة');
+  $('#statusLine').textContent=alreadySkipped() && active
+    ? 'تم التخطي - بانتظار باقي اللاعبين… / Round skipped — waiting for other players…'
+    : alreadySubmitted() && active ? '📸 تم إرسال صورتك. صورة واحدة فقط لكل جولة.' : (messages[s.state] || 'متصل باللعبة');
   updateCaptureControls();
-  $('#flip').disabled=!stream || uploading;
+  $('#flip').disabled=!stream || uploading || skipping;
   const shot=s.photos.find(p=>p.slot===current.slot);
   const container=$('#myPhoto');
   container.replaceChildren();
+  if (alreadySkipped()) {
+    const badge=document.createElement('div');badge.className='skipped-result';
+    badge.textContent='— تم التخطي / SKIPPED • 0 نقطة';container.append(badge);
+    $('#photoBadge').textContent='SKIPPED';return;
+  }
   if (!shot) {
     const empty=document.createElement('div'); empty.className='empty-photo';
     empty.textContent='صورتك ونتيجة التحليل بتظهر هنا بعد الإرسال ✨';container.append(empty);
@@ -152,6 +177,12 @@ function stopCamera() {
   stream=null;$('#video').srcObject=null;
   $('#cameraBox').classList.remove('active');$('#snap').disabled=true;$('#flip').disabled=true;
 }
+function activeCameraFacingMode() {
+  const track=stream?.getVideoTracks?.()[0];
+  const reported=track?.getSettings?.().facingMode ?? track?.getConstraints?.().facingMode;
+  const resolved=typeof reported==='string' ? reported : reported?.exact ?? reported?.ideal;
+  return resolved || facing;
+}
 async function startCamera() {
   stopCamera();
   try {
@@ -160,7 +191,10 @@ async function startCamera() {
     $('#video').srcObject=stream;
     await $('#video').play();
     $('#cameraBox').classList.add('active');
-    $('#cameraBox').classList.toggle('selfie',facing==='user');
+    $('#cameraBox').classList.toggle('selfie',activeCameraFacingMode()==='user');
+    // Match the encoded photo: readable text, no horizontal mirror on either lens.
+    // Inline style also protects against an older cached selfie CSS rule.
+    $('#video').style.transform='none';
     $('#openCamera').classList.add('hidden');
     if (state) render(state);
   } catch (e) {
@@ -170,7 +204,7 @@ async function startCamera() {
   }
 }
 async function uploadBlob(blob) {
-  if (!current || uploading) return;
+  if (!current || uploading || skipping || alreadySkipped()) return;
   if (alreadySubmitted()) {notice('صورتك انرسلت بالفعل. مسموح بصورة واحدة في كل جولة.');return;}
   if (state?.state !== 'round_active' || secondsRemaining() === 0) {notice('انتهى وقت الجولة أو لم تبدأ بعد.');return;}
   const uploadRound = Number(state.round);
@@ -185,6 +219,21 @@ async function uploadBlob(blob) {
   } catch(e) {notice(e.message);await tick();}
   finally {uploading=false;if(state) render(state);}
 }
+async function skipRound() {
+  if (!canSkipRound()) return;
+  const round = Number(state.round);
+  if (!window.confirm('Skip this item for 0 points?\nتخطي هذا الغرض مقابل 0 نقطة؟')) return;
+  if (!canSkipRound() || Number(state.round) !== round) return;
+  skipping=true;updateCaptureControls();
+  try {
+    const s=await api('/api/rooms/'+current.room_id+'/skip', {method:'POST',
+      headers:{'Content-Type':'application/json','x-session':current.session},
+      body:JSON.stringify({slot:current.slot,round})});
+    render(s);skippedRound=round;
+    notice('تم تخطي الغرض لهذه الجولة / Round skipped');
+  } catch(e) {notice(e.message);await tick();}
+  finally {skipping=false;if(state)render(state);}
+}
 function snap() {
   if (!stream || !canSubmitPhoto()) return;
   const video=$('#video');
@@ -193,7 +242,11 @@ function snap() {
   const canvas=document.createElement('canvas');canvas.width=Math.round(video.videoWidth*ratio);canvas.height=Math.round(video.videoHeight*ratio);
   captureInProgress=true;
   updateCaptureControls();
-  canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);
+  const ctx=canvas.getContext('2d');
+  // getUserMedia frames are unmirrored. Keep identity for the front AND rear
+  // camera; applying scale(-1,1) here would reverse text in the uploaded JPEG.
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.drawImage(video,0,0,canvas.width,canvas.height);
   canvas.toBlob(blob=>{
     if (!blob) {notice('تعذر إنشاء الصورة');captureInProgress=false;updateCaptureControls();return;}
     uploadBlob(blob).finally(()=>{captureInProgress=false;updateCaptureControls();});
@@ -201,6 +254,7 @@ function snap() {
 }
 $('#openCamera').addEventListener('click',startCamera);
 $('#snap').addEventListener('click',snap);
+$('#skipRound').addEventListener('click',skipRound);
 $('#flip').addEventListener('click',()=>{facing=facing==='user'?'environment':'user';startCamera()});
 $('#useSystemCamera').addEventListener('click',()=>{if(!canSubmitPhoto())return;$('#fallback').setAttribute('capture',facing);$('#fallback').click()});
 $('#fallback').addEventListener('change',(e)=>{const file=e.target.files?.[0];if(file && canSubmitPhoto())uploadBlob(file);e.target.value='';});
