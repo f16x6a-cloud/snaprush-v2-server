@@ -141,6 +141,8 @@ class Room:
     multiplayer: bool = False
     creation_request: str = ""
     members: dict[int, DesktopMember] = field(default_factory=dict)
+    is_public: bool = False
+    room_name: str = ""
 
     def current_target(self) -> Optional[tuple[str, str, str, str]]:
         if not self.current_round:
@@ -158,7 +160,9 @@ class RoomCreate(BaseModel):
     round_count: Optional[int] = Field(default=None, ge=1, le=15)
     duration: Optional[int] = Field(default=None, ge=15, le=120)
     unity_host: bool = False
+    is_public: bool = True
     player_name: str = Field(default="", max_length=24)
+    room_name: str = Field(default="", max_length=48)
     request_id: str = Field(default="", max_length=64)
 
 
@@ -427,7 +431,7 @@ def _snapshot(room: Room, is_host: bool, current_session: str = "", desktop_slot
                         and time.time() >= room.review_end
                         and current_result is not None and current_result["finalized"])
     result = {
-        "room_id": room.id, "room_code": room.room_code, "state": room.state, "capacity": room.size,
+        "room_id": room.id, "room_code": room.room_code, "room_name": room.room_name, "state": room.state, "capacity": room.size,
         "scoring_mode": room.scoring_mode,
         "connected": len(set(room.players) | set(room.members)), "ready_count": sum(p.ready for p in room.players.values()),
         "ready_phase": "next_round" if next_round_ready else ("lobby" if room.state == "waiting" else "none"),
@@ -488,15 +492,37 @@ def health():
                 **{k: v for k, v in _cloudflare_stats.items() if k != "neurons"},
                 "neurons": round(_cloudflare_stats["neurons"], 3),
             }
-        result["capabilities"] = ["multiplayer_lobby_v1", "skip_round_v1", "host_skip_v1"]
+        result["capabilities"] = ["multiplayer_lobby_v1", "skip_round_v1", "host_skip_v1", "room_browser_v1"]
         return result
 
 
 def _client_response(room: Room, member: DesktopMember, host: bool = False) -> dict:
-    result = {"room_id": room.id, "room_code": room.room_code, "slot": member.slot, "player_key": member.key}
+    result = {"room_id": room.id, "room_code": room.room_code, "room_name": room.room_name, "slot": member.slot, "player_key": member.key}
     if host:
         result["host_key"] = room.host_key
     return result
+
+
+@app.get("/api/rooms")
+def list_public_rooms(response: Response):
+    """Public lobby metadata only. Never expose pairing/session/host credentials."""
+    response.headers["Cache-Control"] = "no-store"
+    with _lock:
+        now = time.time()
+        rooms = []
+        for room in sorted(_rooms.values(), key=lambda r: r.created_at, reverse=True):
+            host = room.members.get(1)
+            if (not room.multiplayer or not room.is_public or room.state != "waiting"
+                    or now - room.created_at > ROOM_TTL or not host or now - host.last_seen > 30
+                    or len(room.members) >= room.size):
+                continue
+            rooms.append({"room_code": room.room_code, "room_name": room.room_name, "host_name": host.name,
+                          "player_count": len(room.members), "player_capacity": room.size,
+                          "scoring_mode": room.scoring_mode, "round_count": room.rounds,
+                          "duration": room.seconds})
+            if len(rooms) == 100:
+                break
+        return {"rooms": rooms}
 
 
 @app.post("/api/rooms")
@@ -524,7 +550,11 @@ def create_room(payload: RoomCreate):
                     active_seconds=seconds, challenge_order=_new_challenge_order(rounds, payload.catalog_mode),
                     catalog_mode=payload.catalog_mode, slot_tokens={i: secrets.token_urlsafe(24) for i in range(1, size + 1)},
                     room_code=code, scoring_mode=payload.scoring_mode or ("WinnerTakesAll" if size == 2 else "RankedTiered"),
-                    multiplayer=payload.player_capacity is not None, creation_request=payload.request_id if payload.unity_host else "")
+                    multiplayer=payload.player_capacity is not None, creation_request=payload.request_id if payload.unity_host else "",
+                    is_public=payload.unity_host and payload.is_public,
+                    room_name=" ".join(payload.room_name.split()) or
+                        (("غرفة " if any("\u0600" <= c <= "\u06ff" for c in payload.player_name) else "Room - ") +
+                         (payload.player_name.strip() or "PLAYER 1")))
         _rooms[room_id] = room
         if payload.unity_host:
             member = DesktopMember(1, secrets.token_urlsafe(32), payload.player_name.strip() or "PLAYER 1", payload.request_id)
