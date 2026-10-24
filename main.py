@@ -804,6 +804,18 @@ def _decode_image(raw: bytes) -> bytes:
 
 def _analyze_photo(room_id: str, submission_id: str, jpg: bytes, requested_description: str):
     result = verify_image(jpg, requested_description)
+    
+    # إذا تم اكتشاف محتوى جنسي، استبدل الملف فوراً بصورة محجوبة فارغة
+    if getattr(result, "is_nsfw", False):
+        try:
+            from ai_verifier import generate_censored_jpeg
+            safe_name = os.path.basename(f"{room_id}_{submission_id}.jpg")
+            target_path = MEDIA_DIR.resolve() / safe_name
+            if target_path.is_file():
+                target_path.write_bytes(generate_censored_jpeg())
+        except Exception:
+            pass
+
     with _lock:
         if AI_PROVIDER == "cloudflare":
             _cloudflare_stats["completed"] += 1
