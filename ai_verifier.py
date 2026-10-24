@@ -73,6 +73,28 @@ _SYSTEM_PROMPT = (
 _CF_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 
 
+def _check_openai_moderation(key: str, image_uri: str) -> bool:
+    """Check image directly with OpenAI Omni Moderation endpoint."""
+    try:
+        resp = http_client.post(
+            "https://api.openai.com/v1/moderations",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": "omni-moderation-latest",
+                "input": [{"type": "image_url", "image_url": {"url": image_uri}}],
+            },
+        )
+        if resp.status_code == 200:
+            results = resp.json().get("results", [])
+            if results:
+                cats = results[0].get("categories", {})
+                if cats.get("sexual", False) or cats.get("sexual/minors", False):
+                    return True
+    except Exception as exc:
+        logger.warning("Moderation API call failed: %s", exc)
+    return False
+
+
 def verify_image(
     jpg: bytes,
     target_description: str,
@@ -93,6 +115,11 @@ def verify_image(
         detail = "low"
 
     image_uri = "data:image/jpeg;base64," + base64.b64encode(jpg).decode("ascii")
+
+    # فحص أولي عبر Moderation API
+    if _check_openai_moderation(key, image_uri):
+        return ImageVerdict("incorrect", "محتوى غير لائق (تم حجب الصورة)", is_nsfw=True)
+
     body = {
         "model": chosen_model,
         "messages": [
@@ -136,23 +163,32 @@ def verify_image(
             if response.status_code in {429, 502, 503, 504} and attempt == 0:
                 time.sleep(0.5)
                 continue
+
+            # إذا حظر OpenAI الصورة تلقائياً بسبب معايير الأمان (كود 400)
+            if response.status_code == 400 and any(
+                term in response.text.lower() for term in ["policy", "safety", "safety_check", "content_filter"]
+            ):
+                return ImageVerdict("incorrect", "محتوى غير لائق (تم حجب الصورة)", is_nsfw=True)
+
             response.raise_for_status()
             break
+
         if response is None:
             raise ValueError("Empty provider response")
-        message = response.json()["choices"][0]["message"]
-        
-        # If OpenAI safety filters tripped on NSFW content
-        if message.get("refusal"):
-            return ImageVerdict("incorrect", "تم حجب الصورة لمخالفتها معايير الأمان", is_nsfw=True)
-            
+
+        choice = response.json()["choices"][0]
+        message = choice["message"]
+
+        # إذا قام نموذج الذكاء الاصطناعي برفض الإجابة بسبب الفلتر الداخلي
+        if message.get("refusal") or choice.get("finish_reason") == "content_filter":
+            return ImageVerdict("incorrect", "محتوى غير لائق (تم حجب الصورة)", is_nsfw=True)
+
         result = json.loads(message["content"])
         is_nsfw = bool(result.get("is_nsfw", False))
         verdict = result["verdict"]
         detected = str(result.get("detected_object") or "")[:90]
         reason = str(result.get("reason") or "")[:160]
 
-        # Block immediately if flagged as NSFW
         if is_nsfw:
             return ImageVerdict(
                 "incorrect", "محتوى غير لائق (تم حجب الصورة)", detected, is_nsfw=True
@@ -169,6 +205,12 @@ def verify_image(
         return ImageVerdict(
             "unverified", reason or "The photo is too unclear to verify", detected
         )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400 and any(
+            term in exc.response.text.lower() for term in ["policy", "safety", "safety_check", "content_filter"]
+        ):
+            return ImageVerdict("incorrect", "محتوى غير لائق (تم حجب الصورة)", is_nsfw=True)
+        return ImageVerdict("unverified", "AI service could not verify this photo; please retry")
     except (
         httpx.HTTPError,
         KeyError,
