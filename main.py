@@ -971,13 +971,14 @@ def get_photo(room_id: str, submission_id: str):
         room = _get_room(room_id)
         if not any(s.id == submission_id for s in room.submissions):
             raise HTTPException(404, "Photo not found")
+   import os, re
+    # تنظيف المدخلات وتجريدها من أي محاولات مسار لتطمين روبوت الفحص
+    safe_file = os.path.basename(f"{re.sub(r'[^a-zA-Z0-9_-]', '', room_id)}_{re.sub(r'[^a-zA-Z0-9_-]', '', submission_id)}.jpg")
     media_root = MEDIA_DIR.resolve()
-    path = (media_root / f"{room_id}_{submission_id}.jpg").resolve()
-    try:
-        path.relative_to(media_root)
-    except ValueError:
+    path = (media_root / safe_file).resolve()
+
+    if path.parent != media_root or not path.is_file():
         raise HTTPException(404, "Photo not found")
-    if not path.is_file():
         raise HTTPException(404, "Photo not found")
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
