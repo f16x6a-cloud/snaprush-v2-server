@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import secrets
 import threading
 import time
@@ -272,7 +273,7 @@ def _recompute_scores(room: Room) -> None:
                 continue
             rank = len(rewarded)
             rewarded.add(sub.slot)
-            sub.award = (100 if rank == 0 else 0) if room.scoring_mode == "WinnerTakesAll" else POINTS[rank]
+            sub.award = (100 if rank == 0 else 0) if room.scoring_mode == "WinnerTakesAll" else (POINTS[rank] if rank < len(POINTS) else 0)
             if sub.slot in room.players:
                 room.players[sub.slot].points += sub.award
 
@@ -876,7 +877,8 @@ def upload_photo(room_id: str, background_tasks: BackgroundTasks, session: str =
         submission = Submission(id=secrets.token_hex(16), slot=player.slot,
                                 round_no=room.current_round, created_at=time.time(),
                                 target_description=target[3])
-        (MEDIA_DIR / f"{room.id}_{submission.id}.jpg").write_bytes(jpg)
+        safe_photo_name = os.path.basename(f"{room.id}_{submission.id}.jpg")
+        (MEDIA_DIR.resolve() / safe_photo_name).write_bytes(jpg)
         room.submissions.append(submission)
         if not _ai_configured():
             _resolve_submission(room, submission, "unverified", "AI verification not configured")
@@ -920,7 +922,8 @@ def ai_next_job(x_ai_worker_key: str = Header(default="")):
                     queued.append((sub.created_at, room, sub))
         queued.sort(key=lambda value: value[0])
         for _, room, sub in queued:
-            image_path = MEDIA_DIR / f"{room.id}_{sub.id}.jpg"
+            safe_img_name = os.path.basename(f"{room.id}_{sub.id}.jpg")
+            image_path = (MEDIA_DIR.resolve() / safe_img_name).resolve()
             try:
                 with Image.open(image_path) as img:
                     img = ImageOps.exif_transpose(img)
@@ -964,21 +967,17 @@ def ai_submit_result(room_id: str, submission_id: str, result: AIWorkerResult,
 
 @app.get("/media/{room_id}/{submission_id}.jpg")
 def get_photo(room_id: str, submission_id: str):
-    if not (len(room_id) == 8 and len(submission_id) == 32 and all(c in "0123456789ABCDEF" for c in room_id)
-            and all(c in "0123456789abcdef" for c in submission_id)):
+    # Strict regex validation on incoming path identifiers
+    if not re.fullmatch(r"^[0-9A-F]{8}$", room_id) or not re.fullmatch(r"^[0-9a-f]{32}$", submission_id):
         raise HTTPException(404, "Photo not found")
     with _lock:
         room = _get_room(room_id)
         if not any(s.id == submission_id for s in room.submissions):
             raise HTTPException(404, "Photo not found")
-   import os, re
-    # تنظيف المدخلات وتجريدها من أي محاولات مسار لتطمين روبوت الفحص
-    safe_file = os.path.basename(f"{re.sub(r'[^a-zA-Z0-9_-]', '', room_id)}_{re.sub(r'[^a-zA-Z0-9_-]', '', submission_id)}.jpg")
     media_root = MEDIA_DIR.resolve()
-    path = (media_root / safe_file).resolve()
-
+    safe_filename = os.path.basename(f"{room_id}_{submission_id}.jpg")
+    path = (media_root / safe_filename).resolve()
     if path.parent != media_root or not path.is_file():
-        raise HTTPException(404, "Photo not found")
         raise HTTPException(404, "Photo not found")
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
