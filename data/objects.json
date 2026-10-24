@@ -1,9 +1,9 @@
 {
   "version": "3.2 snaprush curated",
-  "count": 106,
-  "base_object_count": 106,
+  "count": 108,
+  "base_object_count": 108,
   "variant_count": 0,
-  "target_distinct_objects": 106,
+  "target_distinct_objects": 108,
   "items": [
     {
       "id": "body-human-hand",
@@ -1028,20 +1028,6 @@
       "availability": "common"
     },
     {
-      "id": "body-human-elbow",
-      "ar": "كوع اليد",
-      "en": "human elbow",
-      "category": "body_parts",
-      "difficulty": "easy",
-      "kind": "object",
-      "base_id": "body-elbow",
-      "color": null,
-      "ai_description": "The requested subject is a real human elbow joint connecting the upper and lower arm. Reject knees or drawings.",
-      "aliases_en": ["elbow", "arm elbow"],
-      "safety": "general",
-      "availability": "common"
-    },
-    {
       "id": "furniture-room-door",
       "ar": "باب غرفة أو منزل",
       "en": "interior or exterior door",
@@ -1486,6 +1472,48 @@
       "color": null,
       "ai_description": "The requested subject is a human face clearly sticking out their tongue past their lips in a playful or goofy expression. Reject closed mouths.",
       "aliases_en": ["tongue out", "sticking out tongue", "playful tongue"],
+      "safety": "general",
+      "availability": "common"
+    },
+    {
+      "id": "hardware-light-switch",
+      "ar": "مفتاح إضاءة جداري",
+      "en": "wall light switch",
+      "category": "hardware",
+      "difficulty": "easy",
+      "kind": "object",
+      "base_id": "obj-lightswitch",
+      "color": null,
+      "ai_description": "The requested physical object is a wall-mounted electric light switch, toggle switch, or rocker button used to turn lights on or off.",
+      "aliases_en": ["light switch", "wall switch", "rocker switch"],
+      "safety": "general",
+      "availability": "common"
+    },
+    {
+      "id": "appliance-exhaust-fan",
+      "ar": "شفاط هواء جداري",
+      "en": "exhaust fan",
+      "category": "home_appliances",
+      "difficulty": "medium",
+      "kind": "object",
+      "base_id": "obj-exhaustfan",
+      "color": null,
+      "ai_description": "The requested physical object is a wall or ceiling mounted ventilation exhaust fan or kitchen extractor fan.",
+      "aliases_en": ["exhaust fan", "ventilation fan", "extractor fan"],
+      "safety": "general",
+      "availability": "common"
+    },
+    {
+      "id": "household-water-hose",
+      "ar": "هوز ماء (خرطوم)",
+      "en": "water hose",
+      "category": "household",
+      "difficulty": "easy",
+      "kind": "object",
+      "base_id": "obj-waterhose",
+      "color": null,
+      "ai_description": "The requested physical object is a flexible rubber or plastic garden water hose or cleaning hose, whether coiled, stretched, or attached to a faucet.",
+      "aliases_en": ["garden hose", "water hose", "hose pipe"],
       "safety": "general",
       "availability": "common"
     }
